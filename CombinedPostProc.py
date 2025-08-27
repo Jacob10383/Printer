@@ -9,7 +9,7 @@ import time
 import threading
 
 # Configuration Variables
-ESTIMATOR_PATH = "/Users/jacobtoomey/Downloads/klipper_estimator_osx"
+ESTIMATOR_PATH = "/Applications/klipper_estimator_osx"
 MOONRAKER_URL = "http://192.168.1.4:7125"
 MOONRAKER_TIMEOUT = 3  # Timeout in seconds for connectivity check
 
@@ -20,7 +20,8 @@ ENABLE_HEAT_SOAK_CONFIG = True
 ENABLE_REMOVE_DUPLICATE_TOOL = True
 ENABLE_REMOVE_SPIRAL_MOVE = True
 ENABLE_KLIPPER_ESTIMATOR = True
-ENABLE_BRIM_DETECTION = True
+ENABLE_BRIM_DETECTION = False
+ENABLE_TOOLCHANGE_M104_WAIT = True
 
 # Global variable to store moonraker connectivity result
 moonraker_connectivity = {"checked": True, "connected": True, "message": ""}
@@ -533,6 +534,87 @@ def remove_filament_swap_spiral(gcode_file, lines):
         
     return lines, status_message
 
+def replace_m104_after_toolchange(lines):
+    """Within each '; CP TOOLCHANGE START'..'; CP TOOLCHANGE END' block, find the last T<number>,
+    then the last M104 with an S value after that T, and insert a Klipper TEMPERATURE_WAIT line
+    immediately after it, bounded by ±2C around the original S. Only insert if S >= 200.
+    Append inline comment on the inserted line.
+
+    Returns updated lines, a summary status message, and an optional low-temp warning message.
+    """
+    toolchange_count = 0
+    inserted_count = 0
+    low_temp_count = 0
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.lstrip().startswith("; CP TOOLCHANGE START"):
+            toolchange_count += 1
+
+            # Find the end of this toolchange block
+            end_idx = i + 1
+            while end_idx < n and not lines[end_idx].lstrip().startswith("; CP TOOLCHANGE END"):
+                end_idx += 1
+
+            # Find the last T<number> within the block
+            last_t_index = -1
+            for idx in range(i + 1, min(end_idx, n)):
+                stripped = lines[idx].lstrip()
+                if stripped.startswith(';'):
+                    continue
+                if re.match(r'^T(\d+)\b', stripped, flags=re.IGNORECASE):
+                    last_t_index = idx
+
+            if last_t_index != -1:
+                # Find the last M104 with S after the last T within the block
+                last_m104_index = -1
+                last_m104_s_str = None
+                for idx in range(last_t_index + 1, min(end_idx, n)):
+                    stripped = lines[idx].lstrip()
+                    if stripped.startswith(';'):
+                        continue
+                    if re.match(r'^M104\b', stripped, flags=re.IGNORECASE):
+                        s_match = re.search(r'\bS\s*(-?\d+(?:\.\d+)?)\b', stripped, flags=re.IGNORECASE)
+                        if s_match:
+                            last_m104_index = idx
+                            last_m104_s_str = s_match.group(1)
+
+                if last_m104_index != -1 and last_m104_s_str is not None:
+                    try:
+                        s_value = float(last_m104_s_str)
+                    except Exception:
+                        s_value = None
+
+                    if s_value is not None and s_value >= 200:
+                        min_str = f"{s_value - 2:g}"
+                        max_str = f"{s_value + 2:g}"
+                        leading_ws_match = re.match(r'^(\s*)', lines[last_m104_index])
+                        leading_ws = leading_ws_match.group(1) if leading_ws_match else ''
+                        inserted_line = (
+                            f"{leading_ws}TEMPERATURE_WAIT SENSOR=extruder MINIMUM={min_str} MAXIMUM={max_str} "
+                            f";M104 S{last_m104_s_str} wait inserted.\n"
+                        )
+                        lines.insert(last_m104_index + 1, inserted_line)
+                        inserted_count += 1
+                    else:
+                        low_temp_count += 1
+
+            # Advance to after the end marker (or EOF if not found)
+            i = end_idx + 1 if end_idx < n else n
+        else:
+            i += 1
+
+    summary_message = f"; {toolchange_count} toolchanges detected and {inserted_count} wait commands inserted after M104 commands"
+    low_temp_warning = None
+    if low_temp_count > 0:
+        low_temp_warning = (
+            f"; Warning: {low_temp_count} M104 commands below 200 found in toolchange blocks; no wait added"
+        )
+
+    return lines, summary_message, low_temp_warning
+
 def show_heat_soak_gui(gcode_file):
     root = tk.Tk()
     root.title("Heat Soak Time")
@@ -742,6 +824,15 @@ def main():
         else:
             status_messages.append("; Filament swap spiral removal: Disabled")
 
+        # Step 5: Replace M104 with TEMPERATURE_WAIT inside toolchange blocks (if enabled)
+        if ENABLE_TOOLCHANGE_M104_WAIT:
+            lines, summary_message, low_temp_warning = replace_m104_after_toolchange(lines)
+            status_messages.append(summary_message)
+            if low_temp_warning:
+                status_messages.append(low_temp_warning)
+        else:
+            status_messages.append("; Toolchange M104 replacement: Disabled")
+
         # Write intermediate changes to file
         try:
             with open(gcode_file, "w", encoding='utf-8') as f:
@@ -753,7 +844,7 @@ def main():
         # Wait for connectivity check to complete if it hasn't already
         wait_for_connectivity_check(connectivity_thread)
         
-        # Step 5: Run Klipper Estimator on the modified file (if enabled)
+        # Step 6: Run Klipper Estimator on the modified file (if enabled)
         if ENABLE_KLIPPER_ESTIMATOR:
             # This will raise an exception on failure
             run_klipper_estimator(gcode_file)

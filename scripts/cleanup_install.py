@@ -75,18 +75,12 @@ def install_cleanup_service():
 
 def main():
     parser = argparse.ArgumentParser(description="Cleanup Service Installer")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
-    
-    args = parser.parse_args()
+    parser.parse_args()
     
     # Check if running as root
     if os.geteuid() != 0:
         log("This installer must be run as root (use sudo)", "ERROR")
         sys.exit(1)
-    
-    if args.dry_run:
-        log("DRY RUN: Would install cleanup service")
-        sys.exit(0)
     
     try:
         success = install_cleanup_service()

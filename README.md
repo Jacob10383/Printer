@@ -1,17 +1,7 @@
-
-## What This Installs
-
-- **ustreamer** - Webcam streaming
-- **KAMP Configuration** - Adaptive meshing and purging
-- **Overrides Configuration** - Custom printer settings  
-- **Cleanup Service** - Automatic backup management
-- **Custom Resonance Tester** - Enhanced resonance testing
-- **Bed Mesh Modifications** - System parameter adjustments
-
 ## Quick Start
 
 1. SSH into your printer
-2. Clone this repository: `git clone https://github.com/YOUR_USERNAME/3d-printer-installer.git`
+2. Clone this repository: `git clone https://github.com/Jacob10383/Printer`
 3. Run the installer: `./install.sh`
 
 ## Usage Options
@@ -28,7 +18,7 @@
 
 ### Install Specific Components
 ```bash
- ./install.sh --components kamp overrides cleanup
+ ./install.sh --c kamp overrides cleanup
 ```
 
-Available components: `ustreamer`, `kamp`, `overrides`, `cleanup`, `resonance`, `bed_mesh`, `timelapse`
+Available components: `ustreamer`, `kamp`, `overrides`, `cleanup`, `resonance`, `bed_mesh`, `timelapse`, `timelapseh264`, `mainsail`
