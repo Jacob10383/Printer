@@ -162,7 +162,7 @@ class PrinterInstaller:
     def run_installation(self, components=None):
         """Run the complete installation"""
         if components is None:
-            components = ['ustreamer', 'kamp', 'overrides', 'cleanup', 'resonance', 'bed_mesh', 'timelapse', 'mainsail']
+            components = ['ustreamer', 'overrides', 'cleanup', 'resonance', 'bed_mesh', 'timelapse', 'mainsail']
             
         self.log("Starting 3D Printer Installation...")
         self.log(f"Components to install: {', '.join(components)}")
