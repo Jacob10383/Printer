@@ -536,13 +536,14 @@ def remove_filament_swap_spiral(gcode_file, lines):
 
 def replace_m104_after_toolchange(lines):
     """Within each '; CP TOOLCHANGE START'..'; CP TOOLCHANGE END' block, find the last T<number>,
-    then the last M104 with an S value after that T, and replace it with a Klipper TEMPERATURE_WAIT
-    bounded by ±2C around the original S. Only replace if S >= 200. Append inline comment on the line.
+    then the last M104 with an S value after that T, and insert a Klipper TEMPERATURE_WAIT line
+    immediately after it, bounded by ±2C around the original S. Only insert if S >= 200.
+    Append inline comment on the inserted line.
 
     Returns updated lines, a summary status message, and an optional low-temp warning message.
     """
     toolchange_count = 0
-    replaced_count = 0
+    inserted_count = 0
     low_temp_count = 0
 
     i = 0
@@ -591,12 +592,12 @@ def replace_m104_after_toolchange(lines):
                         max_str = f"{s_value + 2:g}"
                         leading_ws_match = re.match(r'^(\s*)', lines[last_m104_index])
                         leading_ws = leading_ws_match.group(1) if leading_ws_match else ''
-                        new_line = (
+                        inserted_line = (
                             f"{leading_ws}TEMPERATURE_WAIT SENSOR=extruder MINIMUM={min_str} MAXIMUM={max_str} "
-                            f";M104 S{last_m104_s_str} replaced with wait.\n"
+                            f";M104 S{last_m104_s_str} wait inserted.\n"
                         )
-                        lines[last_m104_index] = new_line
-                        replaced_count += 1
+                        lines.insert(last_m104_index + 1, inserted_line)
+                        inserted_count += 1
                     else:
                         low_temp_count += 1
 
@@ -605,11 +606,11 @@ def replace_m104_after_toolchange(lines):
         else:
             i += 1
 
-    summary_message = f"; {toolchange_count} toolchanges detected and {replaced_count} M104 commands replaced with wait commands"
+    summary_message = f"; {toolchange_count} toolchanges detected and {inserted_count} wait commands inserted after M104 commands"
     low_temp_warning = None
     if low_temp_count > 0:
         low_temp_warning = (
-            f"; Warning: {low_temp_count} M104 commands below 200 found in toolchange blocks; not replaced"
+            f"; Warning: {low_temp_count} M104 commands below 200 found in toolchange blocks; no wait added"
         )
 
     return lines, summary_message, low_temp_warning
