@@ -9,7 +9,8 @@ from pathlib import Path
 
 # Configuration
 REPO_ROOT = Path(__file__).parent.parent.absolute()
-CONFIG_DIR = "/mnt/UDISK/printer_data/config"
+BASE_CONFIG_DIR = "/mnt/UDISK/printer_data/config"
+CUSTOM_CONFIG_DIR = "/mnt/UDISK/printer_data/config/custom"
 
 def log(message, level="INFO"):
     print(f"[{level}] {message}")
@@ -39,47 +40,44 @@ def run_command(command):
         log(f"Command failed: {e}", "ERROR")
         return None
 
-def add_include_to_printer_cfg(include_line):
-    """Add an include line to printer.cfg"""
-    printer_cfg = Path(CONFIG_DIR) / "printer.cfg"
-    if not check_file_exists(printer_cfg):
-        log("printer.cfg not found - cannot add include line", "ERROR")
-        return False
-        
-    with open(printer_cfg, 'r') as f:
-        content = f.read()
-        
-    if include_line in content:
-        log(f"{include_line} already included in printer.cfg")
-        return True
-        
-    # Add the include line safely
-    lines = content.split('\n')
-    include_lines = []
-    for i, line in enumerate(lines):
-        if line.strip().startswith('[include'):
-            include_lines.append(i)
+def add_include_to_main_cfg(include_line):
+    """Ensure include line is the FIRST line of custom/main.cfg"""
+    main_cfg = Path(CUSTOM_CONFIG_DIR) / "main.cfg"
     
-    if include_lines:
-        # Insert after the last include line
-        insert_pos = include_lines[-1] + 1
-        lines.insert(insert_pos, include_line)
-    else:
-        # If no include lines found, append at the end
-        # Ensure file ends with a newline before appending
-        if lines and lines[-1] != '':
-            lines.append('')
-        lines.append(include_line)
-        
-    # Write back to file
-    with open(printer_cfg, 'w') as f:
-        f.write('\n'.join(lines))
-    log(f"Added {include_line} to printer.cfg")
-    return True
+    # Do not create files/dirs; fail fast if missing
+    if not check_file_exists(main_cfg):
+        log("custom/main.cfg not found - cannot add include line", "ERROR")
+        return False
+
+    try:
+        with open(main_cfg, 'r') as f:
+            content = f.read()
+
+        lines = content.splitlines()
+        # If already first line, nothing to do
+        if lines and lines[0].strip() == include_line:
+            log(f"{include_line} already present as the first line in main.cfg")
+            return True
+
+        # Remove any existing occurrences of the include line
+        filtered_lines = [line for line in lines if line.strip() != include_line]
+        # Insert include line at the very top
+        new_lines = [include_line] + filtered_lines
+        new_content = '\n'.join(new_lines)
+        if not new_content.endswith('\n'):
+            new_content += '\n'
+
+        with open(main_cfg, 'w') as f:
+            f.write(new_content)
+        log("Added timelapse include to main.cfg")
+        return True
+    except Exception as e:
+        log(f"Failed to update main.cfg: {e}", "ERROR")
+        return False
 
 def add_timelapse_to_moonraker_conf():
     """Ensure [timelapse] exists and contains desired output_path in moonraker.conf"""
-    moonraker_conf = Path(CONFIG_DIR) / "moonraker.conf"
+    moonraker_conf = Path(BASE_CONFIG_DIR) / "moonraker.conf"
     if not check_file_exists(moonraker_conf):
         log("moonraker.conf not found - cannot add timelapse section", "ERROR")
         return False
@@ -236,19 +234,23 @@ def install_timelapse(encoder="mjpeg"):
         log(f"Failed to patch timelapse.py for {encoder.upper()}: {e}", "ERROR")
         return False
         
-    # Copy timelapse.cfg to config directory
+    # Copy timelapse.cfg to custom config directory
     timelapse_cfg_src = Path(temp_dir) / "klipper_macro" / "timelapse.cfg"
-    timelapse_cfg_dst = Path(CONFIG_DIR) / "timelapse.cfg"
+    timelapse_cfg_dst = Path(CUSTOM_CONFIG_DIR) / "timelapse.cfg"
     
     if not check_file_exists(timelapse_cfg_src):
         log(f"Source file not found: {timelapse_cfg_src}", "ERROR")
         return False
         
+    # Do not create destination directory; require it to exist
+    if not os.path.isdir(CUSTOM_CONFIG_DIR):
+        log(f"Custom config directory not found: {CUSTOM_CONFIG_DIR}", "ERROR")
+        return False
     if not copy_file(timelapse_cfg_src, timelapse_cfg_dst):
         return False
         
-    # Add include to printer.cfg
-    if not add_include_to_printer_cfg('[include timelapse.cfg]'):
+    # Add include to the FIRST line of custom/main.cfg
+    if not add_include_to_main_cfg('[include timelapse.cfg]'):
         return False
         
     # Add [timelapse] section to moonraker.conf
@@ -274,7 +276,6 @@ def install_timelapse(encoder="mjpeg"):
 
 def main():
     parser = argparse.ArgumentParser(description="Moonraker Timelapse Installer")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
     parser.add_argument("--encoder", choices=["mjpeg", "h264"], default="mjpeg", help="Select encoder to patch in")
     
     args = parser.parse_args()
@@ -283,10 +284,6 @@ def main():
     if os.geteuid() != 0:
         log("This installer must be run as root (use sudo)", "ERROR")
         sys.exit(1)
-    
-    if args.dry_run:
-        log(f"DRY RUN: Would install moonraker-timelapse component with encoder {args.encoder}")
-        sys.exit(0)
     
     try:
         success = install_timelapse(encoder=args.encoder)

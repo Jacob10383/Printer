@@ -1,0 +1,188 @@
+name: Auto Sync genomez and jac with main
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: genomez
+            prefer_branch_paths: "configs/overrides.cfg"
+          - branch: jac
+            prefer_branch_paths: "configs/overrides.cfg fullinstaller.py services/ustreamer"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # Avoid phantom diffs on Linux runners
+          git config core.filemode false
+          git config core.autocrlf false
+          git config core.eol lf
+          git config core.editor true
+
+      - name: Sync ${{ matrix.branch }} with main
+        id: sync
+        continue-on-error: true
+        env:
+          BRANCH: ${{ matrix.branch }}
+          PREFER_BRANCH_PATHS: ${{ matrix.prefer_branch_paths }}
+        run: |
+          set -euo pipefail
+          git fetch --force --prune origin '+refs/heads/*:refs/remotes/origin/*' --tags
+
+          if git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; then
+            git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          else
+            echo "Remote branch origin/${BRANCH} not found; creating local ${BRANCH} from origin/main"
+            git checkout -B "${BRANCH}" origin/main
+          fi
+
+          COMMITS_AHEAD=$(git rev-list --count origin/main.."${BRANCH}")
+          COMMITS_BEHIND=$(git rev-list --count "${BRANCH}"..origin/main)
+          echo "${BRANCH} is ${COMMITS_AHEAD} commits ahead of origin/main"
+          echo "${BRANCH} is ${COMMITS_BEHIND} commits behind origin/main"
+
+          if [ "${COMMITS_BEHIND}" -eq 0 ]; then
+            echo "${BRANCH} is already up to date with main; nothing to do."
+            exit 0
+          fi
+
+          if [ "${COMMITS_AHEAD}" -eq 0 ]; then
+            echo "No unique commits on ${BRANCH}; performing fast-forward."
+            git merge --ff-only origin/main
+            git push origin "${BRANCH}"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "${BRANCH} has unique commits; rebuilding from origin/main via cherry-pick."
+          if [ -n "$PREFER_BRANCH_PATHS" ]; then
+            echo "Selecting only commits that touch preferred branch paths: $PREFER_BRANCH_PATHS"
+            UNIQUE_COMMITS=$(git log --no-merges --pretty=%H --reverse origin/main.."${BRANCH}" -- $PREFER_BRANCH_PATHS | awk '!seen[$0]++')
+          else
+            UNIQUE_COMMITS=$(git rev-list --reverse origin/main.."${BRANCH}")
+          fi
+          git checkout -B "${BRANCH}" origin/main
+          for COMMIT in $UNIQUE_COMMITS; do
+            echo "Cherry-picking $COMMIT onto ${BRANCH}"
+            set +e
+            git -c core.editor=true cherry-pick "$COMMIT"
+            CHERRY_STATUS=$?
+            set -e
+            if [ "$CHERRY_STATUS" -ne 0 ]; then
+              CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+              if [ -z "$CONFLICTS" ]; then
+                echo "Cherry-pick produced no conflicts and no changes; skipping commit."
+                git -c core.editor=true cherry-pick --skip || true
+                continue
+              fi
+              echo "Auto-resolving conflicts with policy for ${BRANCH}"
+              for FILE in $CONFLICTS; do
+                TAKE_THEIRS=false
+                for P in $PREFER_BRANCH_PATHS; do
+                  if [[ "$FILE" == "$P" || "$FILE" == "$P"/* ]]; then
+                    TAKE_THEIRS=true
+                    break
+                  fi
+                done
+                if $TAKE_THEIRS; then
+                  echo "  - Taking theirs for $FILE (prefer branch)"
+                  git checkout --theirs "$FILE"
+                else
+                  echo "  - Taking ours for $FILE (prefer main)"
+                  git checkout --ours "$FILE"
+                fi
+                git add "$FILE"
+              done
+              set +e
+              ATTEMPTS=0
+              MAX_ATTEMPTS=10
+              while true; do
+                ATTEMPTS=$((ATTEMPTS+1))
+                if [ "$ATTEMPTS" -gt "$MAX_ATTEMPTS" ]; then
+                  echo "Exceeded maximum auto-resolve attempts ($MAX_ATTEMPTS); aborting."
+                  git cherry-pick --abort || true
+                  echo "sync_failed=true" >> $GITHUB_OUTPUT
+                  exit 1
+                fi
+                git -c core.editor=true cherry-pick --continue
+                CONTINUE_STATUS=$?
+                if [ "$CONTINUE_STATUS" -eq 0 ]; then
+                  break
+                fi
+                REMAINING=$(git diff --name-only --diff-filter=U || true)
+                if [ -z "$REMAINING" ]; then
+                  echo "No conflicts reported but continue failed; attempting skip."
+                  git -c core.editor=true cherry-pick --skip
+                  if [ $? -eq 0 ]; then
+                    break
+                  fi
+                  echo "Skip failed; aborting."
+                  git cherry-pick --abort || true
+                  echo "sync_failed=true" >> $GITHUB_OUTPUT
+                  exit 1
+                fi
+                for FILE in $REMAINING; do
+                  TAKE_THEIRS=false
+                  for P in $PREFER_BRANCH_PATHS; do
+                    if [[ "$FILE" == "$P" || "$FILE" == "$P"/* ]]; then
+                      TAKE_THEIRS=true
+                      break
+                    fi
+                  done
+                  if $TAKE_THEIRS; then
+                    echo "  - Re-applying theirs for $FILE (prefer branch)"
+                    git checkout --theirs "$FILE"
+                  else
+                    echo "  - Re-applying ours for $FILE (prefer main)"
+                    git checkout --ours "$FILE"
+                  fi
+                  git add "$FILE"
+                done
+              done
+              set -e
+            fi
+          done
+          echo "Cherry-pick rebuild complete; pushing with lease."
+          git push --force-with-lease origin "${BRANCH}"
+          echo "updated=true" >> $GITHUB_OUTPUT
+
+      - name: Create issue on conflict (${{ matrix.branch }})
+        if: steps.sync.outputs.sync_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['auto-sync-conflict'],
+              state: 'open'
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Auto-sync conflict: ${context.payload.repository.name} (${process.env.BRANCH}) cannot be synced to main`,
+                body: `The automated sync between \`main\` and \`${process.env.BRANCH}\` failed during cherry-pick.\n\n**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nPlease resolve the conflicts manually and close this issue when done.`,
+                labels: ['auto-sync-conflict', 'needs-attention']
+              });
+              console.log('Created new issue for sync conflict');
+            } else {
+              console.log('Issue already exists for sync conflict');
+            }

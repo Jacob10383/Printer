@@ -51,7 +51,7 @@ def install_mainsail():
     unzip_bin = "/opt/bin/unzip" if os.path.exists("/opt/bin/unzip") else "unzip"
 
     log("Downloading Mainsail...")
-    download_command = f"{wget_bin} -q -O mainsail.zip https://github.com/mainsail-crew/mainsail/releases/latest/download/mainsail.zip"
+    download_command = f"{wget_bin} -q -O mainsail.zip https://github.com/Jacob10383/mainsail/releases/latest/download/mainsail.zip"
     result = run_command(download_command)
     if not result or result.returncode != 0:
         log("Failed to download Mainsail", "ERROR")
@@ -151,18 +151,12 @@ def install_mainsail():
 
 def main():
     parser = argparse.ArgumentParser(description="Mainsail Web Interface Installer")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
-    
-    args = parser.parse_args()
+    parser.parse_args()
     
     # Check if running as root
     if os.geteuid() != 0:
         log("This installer must be run as root (use sudo)", "ERROR")
         sys.exit(1)
-    
-    if args.dry_run:
-        log("DRY RUN: Would install Mainsail web interface")
-        sys.exit(0)
     
     try:
         success = install_mainsail()

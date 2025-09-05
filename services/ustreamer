@@ -140,7 +140,7 @@ start_service() {
         fuser -k -9 "$VIDEO_DEV" 2>/dev/null || true
     fi
     
-    # ustreamer command with similar functionality to mjpg_streamer
+
     CMD="$BIN --device=$VIDEO_DEV --resolution=$RESOLUTION --desired-fps=$FPS --format=mjpeg --port=$PORT --host=0.0.0.0 --max-stream-clients $MAX_STREAM_CLIENTS --slowdown --tcp-nodelay"
     log "Launching: $CMD"
     
