@@ -2,10 +2,10 @@
 # Tunables
 VIDEO_DEV="/dev/video0"
 RESOLUTION="1920x1080"
-FPS="30"
+FPS="20"
 PORT="8080"
 BIN="/usr/local/bin/ustreamer"
-RESTART_INTERVAL="30"
+RESTART_INTERVAL="20"
 BOOT_START_DELAY="10"
 MAX_STREAM_CLIENTS="2"
 DEDICATED_LOG="/var/log/ustreamer.log"
@@ -16,7 +16,7 @@ USE_PROCD=1
 TAG="ustreamer"
 CRON_COMMENT="# ustreamer auto-restart"
 AUTO_RESTART_FLAG="/tmp/.ustreamer_auto_restart"
-CAMERA_SCALING_WORKAROUND=0
+CAMERA_SCALING_WORKAROUND=1
 
 tstamp() { TZ=PST8PDT date '+%Y-%m-%d %I:%M:%S %p %Z'; }
 log() {
@@ -175,5 +175,4 @@ restart_service_only() {
     touch "$AUTO_RESTART_FLAG"
     /etc/init.d/ustreamer restart
 }
-
 
