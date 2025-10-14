@@ -2,101 +2,49 @@
 
 import os
 import sys
-import shutil
-import argparse
 from pathlib import Path
 
-# Configuration
-REPO_ROOT = Path(__file__).parent.parent.absolute()
-INIT_D_DIR = "/etc/init.d"
-MOONRAKER_ASVC_FILE = "/mnt/UDISK/printer_data/moonraker.asvc"
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-def log(message, level="INFO"):
-    print(f"[{level}] {message}")
+from lib.file_ops import copy_file  # noqa: E402
+from lib.logging_utils import get_logger  # noqa: E402
+from lib.moonraker import register_service  # noqa: E402
+from lib.paths import MOONRAKER_ASVC, SERVICES_DIR  # noqa: E402
 
-def check_file_exists(path):
-    return os.path.exists(path)
+logger = get_logger("cleanup")
+SERVICE_NAME = "cleanup_printer_backups"
+INIT_D_DIR = Path("/etc/init.d")
 
-def copy_file(src, dst):
-    if not check_file_exists(src):
-        log(f"Source file not found: {src}", "ERROR")
+
+def install_cleanup_service() -> bool:
+    logger.info("Installing cleanup service...")
+    service_src = SERVICES_DIR / SERVICE_NAME
+    service_dst = INIT_D_DIR / SERVICE_NAME
+
+    if not service_src.exists():
+        logger.error("Service source missing: %s", service_src)
         return False
-        
+
     try:
-        shutil.copy2(src, dst)
-        log(f"Successfully copied {src} to {dst}")
-        return True
-    except Exception as e:
-        log(f"Failed to copy {src}: {e}", "ERROR")
+        copy_file(service_src, service_dst, mode=0o755)
+    except Exception as exc:
+        logger.error("Failed to copy service: %s", exc)
         return False
 
-def install_cleanup_service():
-    """Install the cleanup service"""
-    log("Installing cleanup service...")
-    
-    # Copy the service file
-    service_src = REPO_ROOT / "services" / "cleanup_printer_backups"
-    service_dst = Path(INIT_D_DIR) / "cleanup_printer_backups"
-    if not copy_file(service_src, service_dst):
-        return False
-        
-    # Make it executable
-    try:
-        os.chmod(service_dst, 0o755)
-        log("Made cleanup service executable")
-    except Exception as e:
-        log(f"Failed to chmod service file: {e}", "ERROR")
-        return False
-        
-    # Check if service is already in moonraker.asvc
-    if not check_file_exists(MOONRAKER_ASVC_FILE):
-        log("moonraker.asvc not found - cannot add service", "ERROR")
-        return False
-        
-    with open(MOONRAKER_ASVC_FILE, 'r') as f:
-        content = f.read()
-        
-    if 'cleanup_printer_backups' in content:
-        log("cleanup_printer_backups already in moonraker.asvc")
-    else:
-        # Add service to moonraker.asvc
-        try:
-            with open(MOONRAKER_ASVC_FILE, 'a') as f:
-                if not content.endswith('\n'):
-                    f.write('\n')
-                f.write('cleanup_printer_backups\n')
-            log("Added cleanup_printer_backups to moonraker.asvc")
-        except Exception as e:
-            log(f"Failed to update moonraker.asvc: {e}", "ERROR")
-            return False
-            
-    log("Cleanup service installed successfully")
+    register_service(SERVICE_NAME, asvc_path=MOONRAKER_ASVC)
     return True
 
-def main():
-    parser = argparse.ArgumentParser(description="Cleanup Service Installer")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
-    
-    args = parser.parse_args()
-    
-    # Check if running as root
+
+def main() -> None:
     if os.geteuid() != 0:
-        log("This installer must be run as root (use sudo)", "ERROR")
+        logger.error("This installer must be run as root (use sudo)")
         sys.exit(1)
-    
-    if args.dry_run:
-        log("DRY RUN: Would install cleanup service")
-        sys.exit(0)
-    
-    try:
-        success = install_cleanup_service()
-        sys.exit(0 if success else 1)
-    except KeyboardInterrupt:
-        log("Installation interrupted by user", "ERROR")
+
+    if not install_cleanup_service():
         sys.exit(1)
-    except Exception as e:
-        log(f"Installation failed with error: {e}", "ERROR")
-        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

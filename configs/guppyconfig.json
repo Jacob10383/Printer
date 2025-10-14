@@ -1,0 +1,64 @@
+{
+  "config_path": "/mnt/UDISK/root/guppyscreen/guppyconfig.json",
+  "default_printer": "k2",
+  "display_rotate": 3,
+  "display_sleep_sec": 600,
+  "guppy_init_script": "/etc/init.d/S99guppyscreen",
+  "log_path": "/mnt/UDISK/creality/userdata/log/guppyscreen.log",
+  "printers": {
+    "k2": {
+      "default_macros": {
+        "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0",
+        "load_filament": "_GUPPY_LOAD_MATERIAL",
+        "unload_filament": "_GUPPY_QUIT_MATERIAL"
+      },
+      "display_sleep_sec": -1,
+      "fans": [
+        {
+          "id": "output_pin fan0",
+          "display_name": "Part Cooling"
+        },
+        {
+          "id": "output_pin fan1",
+          "display_name": "Exhaust Fan"
+        },
+        {
+          "id": "output_pin fan2",
+          "display_name": "Aux Cooling"
+        },
+        {
+          "id": "output_pin extruder_fan",
+          "display_name": "Extruder Fan"
+        }
+      ],
+      "log_level": "info",
+      "monitored_sensors": [
+        {
+          "display_name": "Extruder",
+          "id": "extruder",
+          "controllable": true,
+          "color": 0
+        },
+        {
+          "display_name": "Bed",
+          "id": "heater_bed",
+          "controllable": true,
+          "color": 5
+        },
+        {
+          "display_name": "Chamber",
+          "id": "heater_generic chamber_heater",
+          "controllable": true,
+          "color": 9
+        }
+      ],
+      "moonraker_api_key": false,
+      "moonraker_host": "127.0.0.1",
+      "moonraker_port": 7125
+    }
+  },
+  "prompt_emergency_stop": true,
+  "thumbnail_path": "/tmp/guppy_thumbnails",
+  "touch_calibrated": false,
+  "wpa_supplicant": "/etc/wifi/wpa_supplicant/sockets"
+}

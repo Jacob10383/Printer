@@ -27,6 +27,9 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Ensure PATH includes /opt/bin for non-interactive shells (wget/unzip/git live here)
+export PATH=/opt/bin:/opt/sbin:$PATH
+
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
    print_error "This script must be run as root (use sudo)"
@@ -45,7 +48,6 @@ if [ ! -f "scripts/install.py" ]; then
     exit 1
 fi
 
-print_status "Starting 3D Printer Installation..."
 print_status "Python version: $(python3 --version)"
 
 # Make install.py executable
@@ -53,11 +55,10 @@ chmod +x scripts/install.py
 
 # Run the installer with all arguments passed through
 python3 scripts/install.py "$@"
+exit_code=$?
 
-# Check exit code
-if [ $? -eq 0 ]; then
-    print_success "Installation completed successfully!"
-else
+if [ $exit_code -ne 0 ]; then
     print_error "Installation failed!"
-    exit 1
 fi
+
+exit $exit_code

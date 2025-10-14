@@ -2,136 +2,71 @@
 
 import os
 import sys
-import shutil
-import argparse
 from pathlib import Path
 
-# Configuration
-REPO_ROOT = Path(__file__).parent.parent.absolute()
-CONFIG_DIR = "/mnt/UDISK/printer_data/config"
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-def log(message, level="INFO"):
-    print(f"[{level}] {message}")
+import shutil
 
-def check_file_exists(path):
-    return os.path.exists(path)
+from lib.file_ops import copy_file, ensure_directory  # noqa: E402
+from lib.logging_utils import get_logger  # noqa: E402
+from lib.config_editors import ensure_include_block  # noqa: E402
+from lib.paths import CONFIGS_DIR, PRINTER_DATA_DIR  # noqa: E402
 
-def check_dir_exists(path):
-    return os.path.isdir(path)
+logger = get_logger("kamp")
+CONFIG_DIR = PRINTER_DATA_DIR / "config"
 
-def copy_file(src, dst):
-    if not check_file_exists(src):
-        log(f"Source file not found: {src}", "ERROR")
+
+def install_kamp() -> bool:
+    logger.info("Installing KAMP configuration...")
+
+    kamp_src = CONFIGS_DIR / "KAMP"
+    kamp_dst = CONFIG_DIR / "KAMP"
+
+    if not kamp_src.exists():
+        logger.error("KAMP source directory not found at %s", kamp_src)
         return False
-        
+
+    ensure_directory(kamp_dst.parent)
+    if kamp_dst.exists():
+        logger.info("Removing existing KAMP directory at %s", kamp_dst)
+        shutil.rmtree(kamp_dst)
+
     try:
-        shutil.copy2(src, dst)
-        log(f"Successfully copied {src} to {dst}")
-        return True
-    except Exception as e:
-        log(f"Failed to copy {src}: {e}", "ERROR")
+        shutil.copytree(kamp_src, kamp_dst)
+    except Exception as exc:
+        logger.error("Failed to copy KAMP directory: %s", exc)
+        return False
+    logger.info("Copied KAMP directory to %s", kamp_dst)
+
+    settings_src = CONFIGS_DIR / "KAMP_Settings.cfg"
+    settings_dst = CONFIG_DIR / "KAMP_Settings.cfg"
+    if not settings_src.exists():
+        logger.error("KAMP_Settings.cfg not found at %s", settings_src)
         return False
 
-def copy_dir(src, dst):
-    if not check_dir_exists(src):
-        log(f"Source directory not found: {src}", "ERROR")
-        return False
-        
-    try:
-        if os.path.exists(dst):
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst)
-        log(f"Successfully copied directory {src} to {dst}")
-        return True
-    except Exception as e:
-        log(f"Failed to copy directory {src}: {e}", "ERROR")
+    copy_file(settings_src, settings_dst)
+    logger.info("Installed %s", settings_dst)
+
+    main_printer_cfg = CONFIG_DIR / "printer.cfg"
+    if not main_printer_cfg.exists():
+        logger.error("printer.cfg not found at %s; cannot add include", main_printer_cfg)
         return False
 
-def add_include_to_printer_cfg(include_line):
-    """Add an include line to printer.cfg"""
-    printer_cfg = Path(CONFIG_DIR) / "printer.cfg"
-    if not check_file_exists(printer_cfg):
-        log("printer.cfg not found - cannot add include line", "ERROR")
-        return False
-        
-    with open(printer_cfg, 'r') as f:
-        content = f.read()
-        
-    if include_line in content:
-        log(f"{include_line} already included in printer.cfg")
-        return True
-        
-    # Add the include line safely
-    lines = content.split('\n')
-    include_lines = []
-    for i, line in enumerate(lines):
-        if line.strip().startswith('[include'):
-            include_lines.append(i)
-    
-    if include_lines:
-        # Insert after the last include line
-        insert_pos = include_lines[-1] + 1
-        lines.insert(insert_pos, include_line)
-    else:
-        # If no include lines found, append at the end
-        # Ensure file ends with a newline before appending
-        if lines and lines[-1] != '':
-            lines.append('')
-        lines.append(include_line)
-        
-    # Write back to file
-    with open(printer_cfg, 'w') as f:
-        f.write('\n'.join(lines))
-    log(f"Added {include_line} to printer.cfg")
+    ensure_include_block(main_printer_cfg, ["KAMP_Settings.cfg"])
+    logger.info("Ensured printer.cfg includes KAMP_Settings.cfg")
     return True
 
-def install_kamp():
-    """Install KAMP configuration files"""
-    log("Installing KAMP configuration...")
-    
-    # Copy KAMP folder
-    kamp_src = REPO_ROOT / "configs" / "KAMP"
-    kamp_dst = Path(CONFIG_DIR) / "KAMP"
-    if not copy_dir(kamp_src, kamp_dst):
-        return False
-        
-    # Copy KAMP_Settings.cfg
-    kamp_settings_src = REPO_ROOT / "configs" / "KAMP_Settings.cfg"
-    kamp_settings_dst = Path(CONFIG_DIR) / "KAMP_Settings.cfg"
-    if not copy_file(kamp_settings_src, kamp_settings_dst):
-        return False
-        
-    # Add include to printer.cfg
-    if not add_include_to_printer_cfg('[include KAMP_Settings.cfg]'):
-        return False
-        
-    log("KAMP configuration installed successfully")
-    return True
 
-def main():
-    parser = argparse.ArgumentParser(description="KAMP Configuration Installer")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
-    
-    args = parser.parse_args()
-    
-    # Check if running as root
-    if os.geteuid() != 0:
-        log("This installer must be run as root (use sudo)", "ERROR")
+def main() -> None:
+    if not install_kamp():
         sys.exit(1)
-    
-    if args.dry_run:
-        log("DRY RUN: Would install KAMP configuration")
-        sys.exit(0)
-    
-    try:
-        success = install_kamp()
-        sys.exit(0 if success else 1)
-    except KeyboardInterrupt:
-        log("Installation interrupted by user", "ERROR")
-        sys.exit(1)
-    except Exception as e:
-        log(f"Installation failed with error: {e}", "ERROR")
-        sys.exit(1)
+
 
 if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print("This installer must be run as root (use sudo)")
+        sys.exit(1)
     main()
