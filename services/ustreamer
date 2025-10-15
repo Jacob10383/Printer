@@ -6,6 +6,8 @@ FPS="30"
 PORT="8080"
 BIN="/usr/local/bin/ustreamer"
 RESTART_INTERVAL="30"
+BOOT_START_DELAY="10"
+MAX_STREAM_CLIENTS="2"
 DEDICATED_LOG="/var/log/ustreamer.log"
 
 START=99
@@ -91,6 +93,8 @@ cameraScalingWorkaround() {
     fi
 }
 
+ 
+
 start_service() {
     local is_auto_restart=0
     [ -f "$AUTO_RESTART_FLAG" ] && is_auto_restart=1
@@ -102,6 +106,16 @@ start_service() {
     fi
     
     mkdir -p "$(dirname "$DEDICATED_LOG")"
+
+    # Apply delay only during early boot (uptime small), not on manual restart
+    if [ "${BOOT_START_DELAY:-0}" -gt 0 ]; then
+        local uptime_s
+        uptime_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+        if [ "${uptime_s:-0}" -lt 180 ]; then
+            log "Boot-time start: delaying by ${BOOT_START_DELAY}s (uptime=${uptime_s}s)"
+            sleep "$BOOT_START_DELAY"
+        fi
+    fi
     
     for i in $(seq 1 30); do
         [ -x "$BIN" ] && [ -c "$VIDEO_DEV" ] && break
@@ -123,20 +137,20 @@ start_service() {
     
     if fuser "$VIDEO_DEV" 2>/dev/null | grep -q '[0-9]'; then
         log "$VIDEO_DEV busy -- force killing all processes"
-        fuser -k -9 /dev/video0 2>/dev/null || true
+        fuser -k -9 "$VIDEO_DEV" 2>/dev/null || true
     fi
     
-    # ustreamer command with similar functionality to mjpg_streamer
-    CMD="$BIN --device=$VIDEO_DEV --resolution=$RESOLUTION --desired-fps=$FPS --format=mjpeg --port=$PORT --host=0.0.0.0 --max-stream-clients 2"
+
+    CMD="$BIN --device=$VIDEO_DEV --resolution=$RESOLUTION --desired-fps=$FPS --format=mjpeg --port=$PORT --host=0.0.0.0 --max-stream-clients $MAX_STREAM_CLIENTS --slowdown --tcp-nodelay"
     log "Launching: $CMD"
     
-    procd_open_instance
-    procd_set_param pidfile /var/run/ustreamer.pid
+    procd_open_instance main
     procd_set_param command sh -c "$CMD >> $DEDICATED_LOG 2>&1"
-    procd_set_param file "$VIDEO_DEV"
     procd_set_param respawn 3600 5 5
     procd_close_instance
     log "ustreamer handed off to procd (respawn enabled)"
+    
+    
     
     if [ "$is_auto_restart" -eq 0 ]; then
         setup_auto_restart

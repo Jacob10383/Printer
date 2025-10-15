@@ -1,0 +1,146 @@
+name: Auto Sync genomez and jac with main
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: genomez
+            prefer_branch_paths: "configs/overrides.cfg"
+          - branch: jac
+            prefer_branch_paths: "configs/overrides.cfg services/ustreamer"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # Avoid phantom diffs on Linux runners
+          git config core.filemode false
+          git config core.autocrlf false
+          git config core.eol lf
+          git config core.editor true
+
+      - name: Sync ${{ matrix.branch }} with main
+        id: sync
+        continue-on-error: true
+        env:
+          BRANCH: ${{ matrix.branch }}
+          PREFER_BRANCH_PATHS: ${{ matrix.prefer_branch_paths }}
+        run: |
+          set -euo pipefail
+          git fetch --force --prune origin '+refs/heads/*:refs/remotes/origin/*' --tags
+
+          if git show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; then
+            git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          else
+            echo "Remote branch origin/${BRANCH} not found; creating local ${BRANCH} from origin/main"
+            git checkout -B "${BRANCH}" origin/main
+          fi
+
+          COMMITS_AHEAD=$(git rev-list --count origin/main.."${BRANCH}")
+          COMMITS_BEHIND=$(git rev-list --count "${BRANCH}"..origin/main)
+          echo "${BRANCH} is ${COMMITS_AHEAD} commits ahead of origin/main"
+          echo "${BRANCH} is ${COMMITS_BEHIND} commits behind origin/main"
+
+          if [ "${COMMITS_BEHIND}" -eq 0 ] && [ "${COMMITS_AHEAD}" -eq 0 ]; then
+            echo "${BRANCH} is already up to date with main; nothing to do."
+            exit 0
+          fi
+
+          echo "${BRANCH} differs from main; rebuilding by overlaying preferred paths."
+
+          BACKUP_DIR=""
+          EXISTING_PREFER_PATHS=""
+          MISSING_PREFER_PATHS=""
+          if [ -n "$PREFER_BRANCH_PATHS" ]; then
+            BACKUP_DIR=$(mktemp -d)
+            cleanup_backup() {
+              if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+                rm -rf "$BACKUP_DIR"
+              fi
+            }
+            trap cleanup_backup EXIT
+            echo "Backing up preferred branch paths to $BACKUP_DIR"
+            for P in $PREFER_BRANCH_PATHS; do
+              if [ -e "$P" ]; then
+                echo "  - Saving $P"
+                EXISTING_PREFER_PATHS="$EXISTING_PREFER_PATHS $P"
+                rsync -aR "$P" "$BACKUP_DIR/"
+              else
+                echo "  - $P not present on branch; will remove after reset"
+                MISSING_PREFER_PATHS="$MISSING_PREFER_PATHS $P"
+              fi
+            done
+          fi
+
+          echo "Resetting ${BRANCH} to origin/main"
+          git checkout -B "${BRANCH}" origin/main
+
+          if [ -n "$PREFER_BRANCH_PATHS" ]; then
+            for P in $MISSING_PREFER_PATHS; do
+              if [ -e "$P" ] || [ -L "$P" ]; then
+                echo "  - Removing $P (missing in branch backup)"
+                rm -rf "$P"
+              fi
+            done
+            for P in $EXISTING_PREFER_PATHS; do
+              if [ -e "$P" ] || [ -L "$P" ]; then
+                echo "  - Clearing $P before restore"
+                rm -rf "$P"
+              fi
+            done
+            if [ -d "$BACKUP_DIR" ] && find "$BACKUP_DIR" -mindepth 1 -print -quit >/dev/null; then
+              echo "Restoring preferred paths from backup"
+              rsync -a "$BACKUP_DIR"/ .
+            fi
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Committing preferred path overlay"
+            git add -A
+            git commit -m "Auto-sync: apply preferred paths for ${BRANCH}"
+          else
+            echo "No overlay changes detected; branch now matches main"
+          fi
+
+          echo "Pushing ${BRANCH} with force-with-lease"
+          git push --force-with-lease origin "${BRANCH}"
+          echo "updated=true" >> $GITHUB_OUTPUT
+
+      - name: Create issue on conflict (${{ matrix.branch }})
+        if: steps.sync.outputs.sync_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['auto-sync-conflict'],
+              state: 'open'
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Auto-sync conflict: ${context.payload.repository.name} (${process.env.BRANCH}) cannot be synced to main`,
+                body: `The automated sync between \`main\` and \`${process.env.BRANCH}\` failed during cherry-pick.\n\n**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nPlease resolve the conflicts manually and close this issue when done.`,
+                labels: ['auto-sync-conflict', 'needs-attention']
+              });
+              console.log('Created new issue for sync conflict');
+            } else {
+              console.log('Issue already exists for sync conflict');
+            }

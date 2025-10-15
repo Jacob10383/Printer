@@ -27,6 +27,9 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Ensure PATH includes /opt/bin for non-interactive shells (wget/unzip/git live here)
+export PATH=/opt/bin:/opt/sbin:$PATH
+
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
    print_error "This script must be run as root (use sudo)"
