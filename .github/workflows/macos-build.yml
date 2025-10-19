@@ -1,0 +1,139 @@
+name: Build macOS GUI Installer App
+
+on:
+  push:
+    branches:
+      - guiBuilder
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: Python version to use for the build
+        required: false
+        default: "3.11"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: macOS Nuitka Build
+    runs-on: macos-latest
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python-version || '3.11' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare Nuitka cache path
+        run: |
+          CACHE_PATH="$HOME/Library/Caches/Nuitka"
+          mkdir -p "$CACHE_PATH"
+          echo "NUITKA_CACHE_DIR=$CACHE_PATH" >> "$GITHUB_ENV"
+
+      - name: Cache Nuitka downloads and objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR }}
+          key: ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-${{ hashFiles('gui_installer.py', 'fullinstaller.py', 'requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka paramiko "flet==0.28.2" "flet-desktop==0.28.2" certifi
+
+      - name: Compile GUI with Nuitka
+        run: |
+          python -m nuitka \
+            --standalone \
+            --macos-create-app-bundle \
+            --macos-app-name="Printer Installer" \
+            --macos-app-version=1.0.0 \
+            --include-module=fullinstaller \
+            --include-module=installer_worker \
+            --include-package=flet \
+            --include-package=flet_desktop \
+            --include-package-data=flet_desktop \
+            --include-package=paramiko \
+            --include-package=certifi \
+            --include-data-file=bootstrap.tar.gz=bootstrap.tar.gz \
+            --assume-yes-for-downloads \
+            --no-deployment-flag=self-execution \
+            --output-dir=build-nuitka \
+            gui_installer.py
+
+      - name: Hide launcher window
+        run: |
+          APP_PATH="build-nuitka/gui_installer.app/Contents"
+          /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$APP_PATH/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$APP_PATH/Info.plist"
+
+      - name: Rename app bundle
+        run: |
+          mv "build-nuitka/gui_installer.app" "build-nuitka/Printer Installer.app"
+
+      - name: Ad-hoc sign the app
+        run: |
+          codesign --force --deep --sign - "build-nuitka/Printer Installer.app"
+
+      - name: Create DMG
+        run: |
+          # Create a temporary directory for DMG contents
+          mkdir -p dmg-temp
+          cp -R "build-nuitka/Printer Installer.app" dmg-temp/
+          
+          # Create symlink to Applications folder
+          ln -s /Applications dmg-temp/Applications
+          
+          # Create the DMG using hdiutil
+          hdiutil create -volname "Printer Installer" \
+            -srcfolder dmg-temp \
+            -ov -format UDZO \
+            printer-installer-macos.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: printer-installer-macos
+          path: printer-installer-macos.dmg
+
+  release:
+    name: Create or Update Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: success()
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: printer-installer-macos
+
+      - name: Get build timestamp
+        id: timestamp
+        run: echo "time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            Latest automated builds from guiBuilder branch.
+
+            ## Available Downloads
+
+            **macOS** (`printer-installer-macos.dmg`)
+            - Built: ${{ steps.timestamp.outputs.time }}
+            - Commit: ${{ github.sha }}
+          files: printer-installer-macos.dmg
+          draft: false
+          prerelease: false
+          make_latest: true

@@ -12,24 +12,31 @@ Basic Installation:
 Advanced Options:
     --password PASSWORD      SSH password (default: creality_2024)
     --reset                  Factory reset device before installation
-    --preserve-stats         Backup/restore Moonraker stats (requires --reset)
+    --reset-only            Factory reset device without installation
+    --preserve-stats         Backup/restore Moonraker stats (requires --reset or --reset-only)
     --key-only               Only ensure SSH access and install public key
 
 Backup & Restore Options:
-    --backup-only            Only perform backup of Moonraker stats
+    --backup-only [DIR]      Only perform backup of Moonraker stats to specified directory (or current directory)
     --restore-only DIR       Restore Moonraker stats from backup directory
     --restore-backup DIR     Use specific backup directory during installation
 
 Examples:
     # Full installation with reset and stats preservation
     python3 fullinstaller.py 192.168.1.100 --reset --preserve-stats
-    
-    # Only backup Moonraker stats
+
+    # Only backup Moonraker stats to current directory
     python3 fullinstaller.py 192.168.1.100 --backup-only
-    
+
+    # Only backup Moonraker stats to specific directory
+    python3 fullinstaller.py 192.168.1.100 --backup-only /path/to/backup
+
+    # Factory reset only with backup
+    python3 fullinstaller.py 192.168.1.100 --reset-only --backup
+
     # Only restore from specific backup
     python3 fullinstaller.py 192.168.1.100 --restore-only /path/to/backup
-    
+
     # Install using existing backup for restore
     python3 fullinstaller.py 192.168.1.100 --reset --preserve-stats --restore-backup /path/to/backup
 """
@@ -41,14 +48,17 @@ import contextlib
 import logging
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
+from urllib import error, request
 
 
 def _stream_reader(file_obj, chunk_size: int = 1024 * 512) -> Iterable[bytes]:
@@ -88,6 +98,11 @@ class FileTransferError(InstallerError):
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+BOOTSTRAP_DOWNLOAD_URLS: tuple[str, ...] = (
+    "https://github.com/Jacob10383/k2-improvements/releases/latest/download/bootstrap.tar.gz",
+    "https://github.com/Jacob10383/k2-improvements/releases/download/strap/bootstrap.tar.gz",
+)
 
 
 @dataclass(frozen=True)
@@ -272,7 +287,9 @@ class RemoteExecutor:
                 clean_line = line.rstrip("\r")
                 collected[kind].append(clean_line)
                 self._logger.debug("REMOTE %s: %s", kind.upper(), clean_line)
-                if success_tokens and any(token in clean_line.lower() for token in success_tokens):
+                if success_tokens and any(
+                    token in clean_line.lower() for token in success_tokens
+                ):
                     success_seen = True
                 if on_line:
                     with contextlib.suppress(Exception):
@@ -294,7 +311,11 @@ class RemoteExecutor:
                     data = channel.recv_stderr(4096).decode("utf-8", errors="replace")
                     _process_stream("stderr", data)
 
-                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                if (
+                    channel.exit_status_ready()
+                    and not channel.recv_ready()
+                    and not channel.recv_stderr_ready()
+                ):
                     break
 
                 time.sleep(self._config.command_check_interval)
@@ -321,7 +342,9 @@ class RemoteExecutor:
                     success_tokens_seen=success_seen,
                     elapsed=time.time() - start_time,
                 )
-            raise CommandExecutionError("Remote command failed during execution") from exc
+            raise CommandExecutionError(
+                "Remote command failed during execution"
+            ) from exc
 
         elapsed = time.time() - start_time
 
@@ -418,10 +441,13 @@ class PrinterInstaller:
         self.reset = reset
         self.preserve_stats = preserve_stats
         self.config = InstallerConfig()
-        self.log_file = f"printer_install_{printer_ip}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
         self.start_time = time.time()
-        self.bootstrap_path = Path(__file__).parent / "bootstrap"
-        self.bootstrap_tar = Path(__file__).parent / "bootstrap.tar.gz"
+
+        # Use __file__.parent for bootstrap path (works in both compiled and direct Python)
+        base_path = Path(__file__).parent
+        self.bootstrap_path = base_path / "bootstrap"
+        self.bootstrap_tar = base_path / "bootstrap.tar.gz"
         self.moonraker_backup_dir: Optional[Path] = None
         self.moonraker_backup_files: dict[str, Path] = {}
 
@@ -440,40 +466,31 @@ class PrinterInstaller:
         self.logger.setLevel(logging.DEBUG)
         self.logger.handlers.clear()
 
-        class _ConsoleFilter(logging.Filter):
-            def filter(self, record: logging.LogRecord) -> bool:
-                return getattr(record, "to_console", True)
-
-        class _FileFilter(logging.Filter):
-            def filter(self, record: logging.LogRecord) -> bool:
-                return getattr(record, "to_file", True)
-
         class _ColorFormatter(logging.Formatter):
             def format(self, record: logging.LogRecord) -> str:
                 msg = super().format(record)
-                if getattr(record, "is_step", False):
+                # Prefix DEBUG messages with [VERBOSE] so GUI can filter them
+                if record.levelno == logging.DEBUG:
+                    msg = f"[VERBOSE] {msg}"
+                # Only apply color to console messages (to_console=True)
+                elif getattr(record, "to_console", True) and getattr(
+                    record, "is_step", False
+                ):
                     return f"\033[96m{msg}\033[0m"
                 return msg
 
+        # Use UTF-8 encoding with error handling to prevent Windows cp1252 crashes
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_handler.addFilter(_ConsoleFilter())
+        console_handler.setLevel(
+            logging.DEBUG
+        )  # Send all messages to GUI for verbose buffer
         console_handler.setFormatter(_ColorFormatter("%(message)s"))
-
-        file_handler = logging.FileHandler(self.log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.addFilter(_FileFilter())
-        file_handler.setFormatter(
-            logging.Formatter(
-                "[%(asctime)s] [%(levelname)s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-        )
+        # Force UTF-8 encoding on the stream with error handling
+        if hasattr(console_handler.stream, "reconfigure"):
+            console_handler.stream.reconfigure(encoding="utf-8", errors="ignore")
 
         self.logger.addHandler(console_handler)
-        self.logger.addHandler(file_handler)
-        self.logger.info(f"Logging to file: {self.log_file}")
-        
+
     def log(self, message: str, level: str = "INFO") -> None:
         if level == "ERROR":
             self.logger.error(message)
@@ -481,15 +498,16 @@ class PrinterInstaller:
             self.logger.warning(message)
         else:
             self.logger.info(message)
-            
+
     def file_log(self, message: str, level: str = "INFO") -> None:
-        extra = {"to_console": False}
+        # Prefix with marker so GUI can identify verbose-only messages
+        prefixed_message = f"[VERBOSE] {message}"
         if level == "ERROR":
-            self.logger.error(message, extra=extra)
+            self.logger.error(prefixed_message)
         elif level == "WARNING":
-            self.logger.warning(message, extra=extra)
+            self.logger.warning(prefixed_message)
         else:
-            self.logger.info(message, extra=extra)
+            self.logger.info(prefixed_message)
 
     def log_step(self, step_number: int, title: str) -> None:
         self.logger.info(
@@ -513,70 +531,137 @@ class PrinterInstaller:
             raise SSHConnectionError(f"Failed to verify SSH access: {exc}") from exc
 
     def install_public_key(self) -> bool:
-        self.log("Installing local SSH public key on printer...")
-        commands = [
-            ["ssh-keygen", "-R", self.printer_ip],
-            [
-                "sshpass",
-                "-p",
-                self.password,
-                "ssh-copy-id",
-                "-o",
-                "StrictHostKeyChecking=no",
-                f"{self.config.username}@{self.printer_ip}",
-            ],
-        ]
+        ssh_dir = Path.home() / ".ssh"
+        # Prefer modern key types first, fall back to older algorithms
+        possible_keys = (
+            "id_ed25519.pub",
+            "id_ecdsa.pub",
+            "id_rsa.pub",
+            "id_dsa.pub",
+        )
+        pubkey_path = next(
+            (
+                ssh_dir / key_name
+                for key_name in possible_keys
+                if (ssh_dir / key_name).exists()
+            ),
+            None,
+        )
+        if pubkey_path is None:
+            raise InstallerError(
+                "No supported public key found in ~/.ssh. Run ssh-keygen first."
+            )
 
-        for cmd in commands:
-            pretty_cmd = " ".join(shlex.quote(c) for c in cmd)
-            self.file_log(f"Running local command: {pretty_cmd}")
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                if exc.stdout:
-                    self.file_log(f"stdout: {exc.stdout.strip()}", "ERROR")
-                if exc.stderr:
-                    self.file_log(f"stderr: {exc.stderr.strip()}", "ERROR")
-                self.log(f"Command failed: {pretty_cmd}", "ERROR")
-                return False
+        pubkey = pubkey_path.read_text().strip()
+        self.log(f"Using public key {pubkey_path}")
 
-            if result.stdout:
-                self.file_log(f"stdout: {result.stdout.strip()}")
-            if result.stderr:
-                self.file_log(f"stderr: {result.stderr.strip()}")
+        self.log(f"Configuring passwordless SSH on {self.printer_ip}...")
+        self.ensure_ssh_access()
 
-        self.file_log("Installed local public key on printer for passwordless SSH.")
-        self.log("Public SSH key configured successfully.")
+        # Remove old host key from known_hosts (host key changes after resets)
+        try:
+            subprocess.run(
+                ["ssh-keygen", "-R", self.printer_ip],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            pass  # ssh-keygen isn't guaranteed on Windows; ignore if missing
+
+        # Install key into Dropbear authorized_keys
+        self.executor.run("mkdir -p /etc/dropbear && chmod 755 /etc/dropbear")
+        escaped_key = pubkey.replace('"', r"\"")
+        self.executor.run(
+            f'grep -qxF "{escaped_key}" /etc/dropbear/authorized_keys '
+            f'|| echo "{escaped_key}" >> /etc/dropbear/authorized_keys'
+        )
+        self.executor.run("chmod 600 /etc/dropbear/authorized_keys")
+
+        self.log("SSH key installed. Future connections will not require a password.")
         return True
 
     # -- File transfer helpers ------------------------------------------
-            
+
+    def ensure_bootstrap_archive(self) -> None:
+        self.file_log(f"Checking for bootstrap archive at: {self.bootstrap_tar}")
+        if self.bootstrap_tar.exists():
+            self.file_log(f"Bootstrap archive found at: {self.bootstrap_tar}")
+            return
+
+        self.log(
+            "Local bootstrap archive missing; attempting to download latest release..."
+        )
+        self.file_log(f"Bootstrap archive not found at: {self.bootstrap_tar}")
+        self._download_bootstrap_archive()
+
+    def _download_bootstrap_archive(self) -> None:
+        last_error: Optional[Exception] = None
+        self.bootstrap_tar.parent.mkdir(parents=True, exist_ok=True)
+
+        for url in BOOTSTRAP_DOWNLOAD_URLS:
+            tmp_path: Optional[Path] = None
+            try:
+                self.file_log(f"Downloading bootstrap archive from {url}")
+                with request.urlopen(url, timeout=60) as response:
+                    status = getattr(response, "status", None)
+                    if status is None:
+                        status = response.getcode()
+                    if status != 200:
+                        raise InstallerError(
+                            f"Unexpected HTTP status {status} while downloading from {url}"
+                        )
+                    with tempfile.NamedTemporaryFile("wb", delete=False) as tmp_file:
+                        shutil.copyfileobj(response, tmp_file)
+                        tmp_path = Path(tmp_file.name)
+                if tmp_path is None:
+                    raise InstallerError(
+                        "Failed to write bootstrap archive to temporary file"
+                    )
+                tmp_path.replace(self.bootstrap_tar)
+                self.log("Bootstrap archive downloaded successfully.")
+                return
+            except (InstallerError, error.URLError, error.HTTPError, OSError) as exc:
+                last_error = exc
+                self.file_log(
+                    f"Failed to download bootstrap archive from {url}: {exc}", "WARNING"
+                )
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+
+        raise InstallerError(
+            "Bootstrap archive not found locally and download failed from all sources"
+        ) from last_error
+
     def upload_bootstrap(self) -> None:
+        self.ensure_bootstrap_archive()
+
+        # Double-check the file exists before attempting to open it
         if not self.bootstrap_tar.exists():
-            raise InstallerError(f"Bootstrap tar file not found at {self.bootstrap_tar}")
-            
+            raise FileTransferError(
+                f"Bootstrap archive not found at {self.bootstrap_tar} after ensure_bootstrap_archive()"
+            )
+
         self.file_log(
             f"Uploading bootstrap archive to {self.config.remote_bootstrap_path}"
         )
 
         self.executor.run(f"mkdir -p {self.config.remote_bootstrap_path}")
 
-        remote_archive = os.path.join(
-            self.config.remote_bootstrap_path,
-            self.config.remote_bootstrap_archive_name,
-        )
+        # Use forward slash for remote Linux path (not os.path.join which uses local OS separator)
+        remote_archive = f"{self.config.remote_bootstrap_path}/{self.config.remote_bootstrap_archive_name}"
 
-        with self.bootstrap_tar.open("rb") as local_file:
-            self.executor.run(
-                f"cat > {remote_archive}",
-                input_data=_stream_reader(local_file),
-                request_pty=False,
-            )
+        try:
+            with self.bootstrap_tar.open("rb") as local_file:
+                self.executor.run(
+                    f"cat > {remote_archive}",
+                    input_data=_stream_reader(local_file),
+                    request_pty=False,
+                )
+        except (OSError, IOError) as exc:
+            raise FileTransferError(
+                f"Failed to read bootstrap archive from {self.bootstrap_tar}: {exc}"
+            ) from exc
 
         extract_cmd = (
             f"cd {self.config.remote_bootstrap_path} && "
@@ -587,12 +672,18 @@ class PrinterInstaller:
             f"rm -f {remote_archive}",
             request_pty=False,
         )
-        
+
         self.file_log("Bootstrap files uploaded successfully")
 
     # -- Moonraker data --------------------------------------------------
 
-    def backup_moonraker_stats(self, *, force: bool = False) -> None:
+    def backup_moonraker_stats(
+        self,
+        *,
+        force: bool = False,
+        backup_dir: Optional[Path] = None,
+        use_temp: bool = False,
+    ) -> None:
         if not self.preserve_stats and not force:
             return
 
@@ -604,7 +695,18 @@ class PrinterInstaller:
         self.log(msg)
         self.ensure_ssh_access()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.moonraker_backup_dir = Path.cwd() / f"moonraker_backup_{self.printer_ip}_{timestamp}"
+
+        # Determine backup directory: explicit path > temp > current working directory
+        if backup_dir:
+            base_dir = backup_dir
+        elif use_temp:
+            base_dir = Path(tempfile.gettempdir())
+        else:
+            base_dir = Path.cwd()
+
+        self.moonraker_backup_dir = (
+            base_dir / f"moonraker_backup_{self.printer_ip}_{timestamp}"
+        )
         self.moonraker_backup_dir.mkdir(parents=True, exist_ok=True)
 
         targets = [
@@ -645,7 +747,7 @@ class PrinterInstaller:
 
         self.file_log("Restoring Moonraker stats to device...")
         self.ensure_ssh_access()
-        
+
         self.executor.run(
             f"/etc/init.d/{self.config.moonraker_service} stop",
             timeout=30,
@@ -673,12 +775,12 @@ class PrinterInstaller:
             f"/etc/init.d/{self.config.moonraker_service} start",
             timeout=30,
         )
-        
+
         if restored == 0:
             self.log("No Moonraker stats files were restored.", "WARNING")
         else:
             self.log(f"Restored {restored} Moonraker stats file(s)")
-        
+
     # -- Installation steps ---------------------------------------------
 
     def run_bootstrap_script(self) -> None:
@@ -695,11 +797,12 @@ class PrinterInstaller:
             ),
         )
         self.file_log("Bootstrap script completed successfully")
+        self.file_log("Installing nano via opkg...")
+        self.executor.run("/opt/bin/opkg install nano", timeout=120)
+        self.file_log("Nano package installed via opkg")
 
     def run_k2_improvements(self) -> None:
-        self.file_log(
-            "Running k2-improvements script (this may take 10-20 minutes)..."
-        )
+        self.file_log("Running k2-improvements script (this may take 10-20 minutes)...")
 
         def feature_echo(line: str) -> None:
             match = line.lower().strip()
@@ -712,11 +815,9 @@ class PrinterInstaller:
             on_line=feature_echo,
         )
         self.file_log("k2-improvements script completed")
-        
+
     def clone_and_install_repo(self) -> None:
-        self.file_log(
-            f"Cloning repository and switching to branch '{self.branch}'..."
-        )
+        self.file_log(f"Cloning repository and switching to branch '{self.branch}'...")
 
         self.executor.run(f"rm -rf {self.config.remote_clone_dir}")
 
@@ -759,9 +860,9 @@ class PrinterInstaller:
                     "One or more installations failed.",
                     extra={"to_file": False},
                 )
-        
+
         self.file_log("Repository installation completed")
-        
+
     def run_remote_command(
         self,
         command: str,
@@ -821,60 +922,80 @@ class PrinterInstaller:
 
     # -- Orchestration ---------------------------------------------------
 
-    def install(self) -> None:
+    def install(
+        self,
+        *,
+        run_bootstrap: bool = True,
+        run_k2: bool = True,
+        run_repo: bool = True,
+    ) -> None:
         try:
             self.log(f"Starting printer installation for {self.printer_ip}")
             self.log(f"Branch: {self.branch}")
-            self.log(f"Detailed log: {self.log_file}")
             self.log("")
-            
+
             self.file_log("Starting full printer installation...")
             self.file_log(f"Target: {self.printer_ip}")
             self.file_log(f"Branch: {self.branch}")
-            self.file_log(f"Log file: {self.log_file}")
+            selection = [
+                name
+                for enabled, name in (
+                    (run_bootstrap, "bootstrap"),
+                    (run_k2, "k2-improvements"),
+                    (run_repo, "repo-install"),
+                )
+                if enabled
+            ]
+            if len(selection) != 3:
+                selected_text = ", ".join(selection) if selection else "none"
+                self.file_log(f"Selected operations: {selected_text}")
 
             self.log_step(1, "Setting up SSH access")
             self.ensure_ssh_access()
             self.log("SSH access configured")
 
-            self.log_step(2, "Uploading bootstrap files")
-            self.upload_bootstrap()
-            self.log("Bootstrap files uploaded")
-            
-            self.log_step(3, "Running bootstrap script")
-            self.run_bootstrap_script()
-            self.log("Bootstrap script completed")
-            
-            self.log_step(4, "Running k2-improvements script (10-20 min)")
-            self.run_k2_improvements()
-            self.log("K2 improvements completed")
-            
-            self.log_step(5, "Cloning and installing repository")
-            self.clone_and_install_repo()
-            self.log("Repository installation completed")
+            step_number = 2
 
-            self.install_public_key()
+            if run_bootstrap:
+                self.log_step(step_number, "Deploying bootstrap (upload + run)")
+                self.upload_bootstrap()
+                self.log("Bootstrap files uploaded")
+                self.run_bootstrap_script()
+                self.log("Bootstrap script completed")
+                step_number += 1
+
+            if run_k2:
+                self.log_step(step_number, "Running k2-improvements script (10-20 min)")
+                self.run_k2_improvements()
+                self.log("K2 improvements completed")
+                step_number += 1
+
+            if run_repo:
+                self.log_step(step_number, "Cloning and installing repository")
+                self.clone_and_install_repo()
+                self.log("Repository installation completed")
+                step_number += 1
+                self.install_public_key()
 
             if self.preserve_stats:
-                self.log_step(6, "Restoring Moonraker stats")
+                self.log_step(step_number, "Restoring Moonraker stats")
                 try:
                     self.restore_moonraker_stats()
                     self.log("Moonraker stats restore completed")
                 except InstallerError as exc:
                     self.log(f"Moonraker stats restore failed: {exc}", "ERROR")
-            
+                step_number += 1
+
             total_time = time.time() - self.start_time
             minutes = int(total_time // 60)
             seconds = int(total_time % 60)
-            
+
             self.log("")
             self.log(f"Successfully installed in {minutes}m {seconds}s")
-            self.log(f"Complete log saved to: {self.log_file}")
-            
+
             self.file_log("Full installation completed successfully!")
             self.file_log(f"Total installation time: {minutes}m {seconds}s")
-            self.file_log(f"Complete log saved to: {self.log_file}")
-            
+
         except InstallerError as exc:
             self._handle_failure(exc)
         finally:
@@ -887,14 +1008,12 @@ class PrinterInstaller:
 
         self.log("")
         self.log(f"Installation failed after {minutes}m {seconds}s")
-        self.log(f"Check log file for details: {self.log_file}")
 
         self.log(f"Installation failed: {error}", "ERROR")
         self.log(
             f"Installation time before failure: {minutes}m {seconds}s",
             "ERROR",
         )
-        self.log(f"Check log file for details: {self.log_file}", "ERROR")
         sys.exit(1)
 
 
@@ -933,11 +1052,16 @@ Examples:
         help="Factory reset the device before installation",
     )
     parser.add_argument(
+        "--reset-only",
+        action="store_true",
+        help="Factory reset the device without running installation",
+    )
+    parser.add_argument(
         "--preserve-stats",
         "--backup",
         dest="preserve_stats",
         action="store_true",
-        help="Backup and restore Moonraker stats across factory reset (requires --reset)",
+        help="Backup and restore Moonraker stats across factory reset (requires --reset or --reset-only)",
     )
     parser.add_argument(
         "--key-only",
@@ -947,37 +1071,78 @@ Examples:
     )
     parser.add_argument(
         "--backup-only",
-        action="store_true",
-        help="Only perform backup of Moonraker stats without installation"
+        nargs="?",
+        const=None,
+        default=False,
+        metavar="BACKUP_DIR",
+        help="Only perform backup of Moonraker stats to specified directory (or current directory if not specified)",
     )
     parser.add_argument(
         "--restore-only",
         metavar="BACKUP_DIR",
-        help="Restore Moonraker stats from specified backup directory without installation"
+        help="Restore Moonraker stats from specified backup directory without installation",
     )
     parser.add_argument(
         "--restore-backup",
         metavar="BACKUP_DIR",
-        help="Specify backup directory to use for restore during installation"
+        help="Specify backup directory to use for restore during installation",
     )
-    
+    parser.add_argument(
+        "--run-bootstrap",
+        action="store_true",
+        help="Upload bootstrap archive and run bootstrap script only",
+    )
+    parser.add_argument(
+        "--run-k2",
+        action="store_true",
+        help="Run the k2-improvements script",
+    )
+    parser.add_argument(
+        "--run-repo",
+        action="store_true",
+        help="Clone the repository and execute install.sh",
+    )
+
     args = parser.parse_args()
-    
+
     # Validate modes: --key-only, --backup-only, --restore-only are mutually exclusive
-    modes_selected = sum(1 for x in (args.key_only, args.backup_only, bool(args.restore_only)) if x)
+    modes_selected = sum(
+        1
+        for x in (
+            args.key_only,
+            args.backup_only is not False,
+            bool(args.restore_only),
+            args.reset_only,
+        )
+        if x
+    )
     if modes_selected > 1:
-        print("ERROR: Choose only one mode: --key-only, --backup-only, or --restore-only.")
+        print(
+            "ERROR: Choose only one mode: --key-only, --backup-only, --restore-only, or --reset-only."
+        )
         sys.exit(2)
 
     # Forbid mixing modes with install modifiers
-    if args.key_only or args.backup_only or args.restore_only:
-        if args.reset or args.preserve_stats or args.restore_backup:
-            print("ERROR: --key-only, --backup-only, and --restore-only cannot be combined with --reset, --preserve-stats, or --restore-backup.")
+    if args.key_only or args.backup_only is not False or args.restore_only:
+        if args.reset or args.reset_only or args.preserve_stats or args.restore_backup:
+            print(
+                "ERROR: --key-only, --backup-only, and --restore-only cannot be combined with --reset, --reset-only, --preserve-stats, or --restore-backup."
+            )
             sys.exit(2)
 
-    # --preserve-stats requires --reset
-    if args.preserve_stats and not args.reset:
-        print("ERROR: --preserve-stats/--backup can only be used together with --reset.")
+    if args.reset_only:
+        if args.reset:
+            print("ERROR: --reset-only cannot be combined with --reset.")
+            sys.exit(2)
+        if args.restore_backup:
+            print("ERROR: --reset-only cannot be combined with --restore-backup.")
+            sys.exit(2)
+
+    # --preserve-stats requires --reset or --reset-only
+    if args.preserve_stats and not (args.reset or args.reset_only):
+        print(
+            "ERROR: --preserve-stats/--backup can only be used together with --reset or --reset-only."
+        )
         sys.exit(2)
 
     # --preserve-stats conflicts with --restore-backup
@@ -994,7 +1159,9 @@ Examples:
         required_files = ["data.mdb", "moonraker-sql.db"]
         missing = [name for name in required_files if not (backup_dir / name).exists()]
         if missing:
-            print(f"ERROR: Backup directory is missing required files: {', '.join(missing)} in {backup_dir}")
+            print(
+                f"ERROR: Backup directory is missing required files: {', '.join(missing)} in {backup_dir}"
+            )
             sys.exit(2)
 
     if args.restore_only:
@@ -1007,7 +1174,7 @@ Examples:
         printer_ip=args.printer_ip,
         branch=args.branch,
         password=args.password,
-        reset=args.reset,
+        reset=args.reset or args.reset_only,
         preserve_stats=args.preserve_stats,
     )
 
@@ -1019,10 +1186,13 @@ Examples:
             installer.log("Failed to configure public SSH key.", "ERROR")
             sys.exit(1)
 
-    if args.backup_only:
+    if args.backup_only is not False:
         installer.ensure_ssh_access()
-        installer.backup_moonraker_stats(force=True)
-        print(f"Backup completed successfully. Saved to: {installer.moonraker_backup_dir}")
+        backup_dir = Path(args.backup_only) if args.backup_only else None
+        installer.backup_moonraker_stats(force=True, backup_dir=backup_dir)
+        print(
+            f"Backup completed successfully. Saved to: {installer.moonraker_backup_dir}"
+        )
         sys.exit(0)
 
     if args.restore_only:
@@ -1030,10 +1200,18 @@ Examples:
         installer.moonraker_backup_dir = Path(args.restore_only)
         installer.moonraker_backup_files = {
             "data.mdb": installer.moonraker_backup_dir / "data.mdb",
-            "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db"
+            "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db",
         }
         installer.restore_moonraker_stats(force=True)
         print("Restore completed successfully.")
+        sys.exit(0)
+
+    if args.reset_only:
+        if args.preserve_stats:
+            installer.backup_moonraker_stats(use_temp=True)
+        installer.reset_device()
+        installer.log("Factory reset completed successfully.")
+        installer.executor.close()
         sys.exit(0)
 
     if args.reset and args.preserve_stats:
@@ -1042,27 +1220,31 @@ Examples:
             installer.moonraker_backup_dir = Path(args.restore_backup)
             installer.moonraker_backup_files = {
                 "data.mdb": installer.moonraker_backup_dir / "data.mdb",
-                "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db"
+                "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db",
             }
         else:
-            # Create new backup as usual
-            installer.backup_moonraker_stats()
+            # Create new backup in temp (automated, single-session)
+            installer.backup_moonraker_stats(use_temp=True)
     if args.reset:
         installer.reset_device()
         installer.ensure_ssh_access()
 
-    installer.install()
+    selected_steps_provided = any((args.run_bootstrap, args.run_k2, args.run_repo))
+    installer.install(
+        run_bootstrap=args.run_bootstrap or not selected_steps_provided,
+        run_k2=args.run_k2 or not selected_steps_provided,
+        run_repo=args.run_repo or not selected_steps_provided,
+    )
 
     # If a specific backup was requested for restore during install, perform restore now
     if args.restore_backup:
         installer.moonraker_backup_dir = Path(args.restore_backup)
         installer.moonraker_backup_files = {
             "data.mdb": installer.moonraker_backup_dir / "data.mdb",
-            "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db"
+            "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db",
         }
         installer.restore_moonraker_stats(force=True)
 
 
 if __name__ == "__main__":
     main()
-

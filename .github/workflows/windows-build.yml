@@ -1,0 +1,139 @@
+name: Build Windows GUI Installer App
+
+on:
+  push:
+    branches:
+      - guiBuilder
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: Python version to use for the build
+        required: false
+        default: "3.11"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows Nuitka Build
+    runs-on: windows-latest
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python-version || '3.11' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare Nuitka cache path
+        shell: pwsh
+        run: |
+          $cachePath = Join-Path $Env:LOCALAPPDATA "Nuitka\Cache"
+          New-Item -ItemType Directory -Force -Path $cachePath | Out-Null
+          "NUITKA_CACHE_DIR=$cachePath" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cache Nuitka downloads and objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR }}
+          key: ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-${{ hashFiles('gui_installer.py', 'fullinstaller.py', 'requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka paramiko flet flet-desktop certifi
+
+      - name: Compile GUI with Nuitka
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:NUITKA_CACHE_DIR = Join-Path $Env:LOCALAPPDATA "Nuitka\Cache"
+          New-Item -ItemType Directory -Force -Path $env:NUITKA_CACHE_DIR | Out-Null
+
+          $iconPath = Join-Path $PWD "assets\printer.ico"
+          $nuitkaArgs = @(
+            "--standalone"
+            "--onefile"
+            "--include-module=fullinstaller"
+            "--include-module=installer_worker"
+            "--include-package=flet"
+            "--include-package=flet_desktop"
+            "--include-package=paramiko"
+            "--include-package=certifi"
+            "--include-data-file=bootstrap.tar.gz=bootstrap.tar.gz"
+            "--assume-yes-for-downloads"
+            "--noinclude-pytest-mode=nofollow"
+            "--no-deployment-flag=self-execution"
+            "--windows-console-mode=disable"
+            "--windows-company-name=Printer Installer"
+            "--windows-product-name=Printer Installer"
+            "--windows-file-version=1.0.0"
+            "--windows-product-version=1.0.0"
+            "--output-dir=build-nuitka"
+          )
+
+          if (Test-Path $iconPath) {
+            $nuitkaArgs += "--windows-icon-from-ico=$iconPath"
+          } else {
+            Write-Host "::warning::assets\printer.ico not found; using default executable icon."
+          }
+
+          $nuitkaArgs += "gui_installer.py"
+
+          python -m nuitka @nuitkaArgs
+
+      - name: Rename executable
+        shell: pwsh
+        run: |
+          $exePath = Get-ChildItem -Path "build-nuitka" -Filter "*.exe" -Recurse | Select-Object -First 1
+          if ($exePath) {
+            Copy-Item $exePath.FullName -Destination "printer-installer-windows.exe"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: printer-installer-windows
+          path: printer-installer-windows.exe
+
+  release:
+    name: Create or Update Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: success()
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: printer-installer-windows
+
+      - name: Get build timestamp
+        id: timestamp
+        run: echo "time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            Latest automated builds from guiBuilder branch.
+
+            ## Available Downloads
+
+            **Windows** (`printer-installer-windows.exe`)
+            - Built: ${{ steps.timestamp.outputs.time }}
+            - Commit: ${{ github.sha }}
+          files: printer-installer-windows.exe
+          draft: false
+          prerelease: false
+          make_latest: true
