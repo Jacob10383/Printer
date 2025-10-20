@@ -1,0 +1,281 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - TestBuilder
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: Python version to use for the build
+        required: false
+        default: "3.11"
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python-version || '3.11' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare Nuitka cache path
+        shell: pwsh
+        run: |
+          $cachePath = Join-Path $Env:LOCALAPPDATA "Nuitka\Cache"
+          New-Item -ItemType Directory -Force -Path $cachePath | Out-Null
+          "NUITKA_CACHE_DIR=$cachePath" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cache Nuitka downloads and objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR }}
+          key: ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-${{ hashFiles('gui_installer.py', 'fullinstaller.py', 'requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka paramiko flet flet-desktop
+
+      - name: Compile GUI with Nuitka
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:NUITKA_CACHE_DIR = Join-Path $Env:LOCALAPPDATA "Nuitka\Cache"
+          New-Item -ItemType Directory -Force -Path $env:NUITKA_CACHE_DIR | Out-Null
+
+          $iconPath = Join-Path $PWD "assets\printer.ico"
+          $nuitkaArgs = @(
+            "--standalone"
+            "--onefile"
+            "--include-module=fullinstaller"
+            "--include-module=installer_worker"
+            "--include-package=flet"
+            "--include-package=flet_desktop"
+            "--include-package=paramiko"
+            "--include-data-file=bootstrap.tar.gz=bootstrap.tar.gz"
+            "--assume-yes-for-downloads"
+            "--noinclude-pytest-mode=nofollow"
+            "--no-deployment-flag=self-execution"
+            "--windows-console-mode=disable"
+            "--windows-company-name=Printer Installer"
+            "--windows-product-name=Printer Installer"
+            "--windows-file-version=1.0.0"
+            "--windows-product-version=1.0.0"
+            "--output-dir=build-nuitka"
+          )
+
+          if (Test-Path $iconPath) {
+            $nuitkaArgs += "--windows-icon-from-ico=$iconPath"
+          } else {
+            Write-Host "::warning::assets\printer.ico not found; using default executable icon."
+          }
+
+          $nuitkaArgs += "gui_installer.py"
+
+          python -m nuitka @nuitkaArgs
+
+      - name: Rename executable
+        shell: pwsh
+        run: |
+          $exePath = Get-ChildItem -Path "build-nuitka" -Filter "*.exe" -Recurse | Select-Object -First 1
+          if ($exePath) {
+            Copy-Item $exePath.FullName -Destination "printer-installer-windows.exe"
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: printer-installer-windows.exe
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    env:
+      PYTHON_VERSION: ${{ github.event.inputs.python-version || '3.11' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare Nuitka cache path
+        run: |
+          CACHE_PATH="$HOME/Library/Caches/Nuitka"
+          mkdir -p "$CACHE_PATH"
+          echo "NUITKA_CACHE_DIR=$CACHE_PATH" >> "$GITHUB_ENV"
+
+      - name: Cache Nuitka downloads and objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR }}
+          key: ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-${{ hashFiles('gui_installer.py', 'fullinstaller.py', 'requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka-${{ env.PYTHON_VERSION }}-
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka paramiko "flet==0.28.2" "flet-desktop==0.28.2"
+
+      - name: Compile GUI with Nuitka
+        run: |
+          python -m nuitka \
+            --standalone \
+            --macos-create-app-bundle \
+            --macos-app-name="Printer Installer" \
+            --macos-app-version=1.0.0 \
+            --include-module=fullinstaller \
+            --include-module=installer_worker \
+            --include-package=flet \
+            --include-package=flet_desktop \
+            --include-package=paramiko \
+            --include-data-file=bootstrap.tar.gz=bootstrap.tar.gz \
+            --assume-yes-for-downloads \
+            --no-deployment-flag=self-execution \
+            --output-dir=build-nuitka \
+            gui_installer.py
+
+      - name: Rename app bundle
+        run: |
+          mv "build-nuitka/gui_installer.app" "build-nuitka/Printer Installer.app"
+
+      - name: Update bundle name in Info.plist
+        run: |
+          APP_PATH="build-nuitka/Printer Installer.app/Contents"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Printer Installer'" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Printer Installer'" "$APP_PATH/Info.plist"
+
+      - name: Hide launcher window
+        run: |
+          APP_PATH="build-nuitka/Printer Installer.app/Contents"
+          /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$APP_PATH/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$APP_PATH/Info.plist"
+
+      - name: Ad-hoc sign the app
+        run: |
+          codesign --force --deep --sign - "build-nuitka/Printer Installer.app"
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Verify app bundle exists
+        run: |
+          if [ ! -d "build-nuitka/Printer Installer.app" ]; then
+            echo "Error: Application bundle not found at build-nuitka/Printer Installer.app"
+            exit 1
+          fi
+          echo "Application bundle verified"
+
+      - name: Create DMG with Applications link
+        run: |
+          if command -v create-dmg &> /dev/null; then
+            echo "Creating DMG with create-dmg..."
+            create-dmg \
+              --volname "Printer Installer" \
+              --window-pos 200 120 \
+              --window-size 600 400 \
+              --icon-size 100 \
+              --icon "Printer Installer.app" 175 120 \
+              --hide-extension "Printer Installer.app" \
+              --app-drop-link 425 120 \
+              "printer-installer-macos.dmg" \
+              "build-nuitka/Printer Installer.app"
+          else
+            echo "Warning: create-dmg not available, using hdiutil fallback"
+            mkdir -p dmg-temp
+            cp -R "build-nuitka/Printer Installer.app" dmg-temp/
+            hdiutil create -volname "Printer Installer" \
+              -srcfolder dmg-temp \
+              -ov -format UDZO \
+              printer-installer-macos.dmg
+            rm -rf dmg-temp
+          fi
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: printer-installer-macos.dmg
+
+  release:
+    name: Create Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+
+      - name: Delete existing release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: 'latest'
+              });
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id
+              });
+              console.log('Deleted existing release');
+            } catch (error) {
+              console.log('No existing release to delete');
+            }
+            
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/latest'
+              });
+              console.log('Deleted existing tag');
+            } catch (error) {
+              console.log('No existing tag to delete');
+            }
+
+      - name: Create new release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            Latest automated build from TestBuilder branch.
+            
+            **Download:**
+            - Windows: `printer-installer-windows.exe`
+            - macOS: `printer-installer-macos.dmg`
+          files: |
+            printer-installer-windows.exe
+            printer-installer-macos.dmg
+          draft: false
+          prerelease: false
