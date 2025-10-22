@@ -1,44 +1,43 @@
 #!/usr/bin/env python3
 """
+Reference summary for the GTK/Flet GUI and supporting automation.
 
-Usage:
-    python3 fullinstaller.py <printer_ip> [branch_name] [options]
+Positional arguments:
+  printer_ip             Target printer IPv4 address (required)
+  branch                 Git branch to deploy (defaults to 'main' when omitted)
 
-Basic Installation:
-    python3 fullinstaller.py 192.168.1.100
-    python3 fullinstaller.py 192.168.1.100 jac
-    python3 fullinstaller.py 192.168.1.100 main
+Core options:
+  --password PASSWORD    SSH password (default: creality_2024)
+  --reset                Factory reset device before installation
+  --reset-only           Factory reset device without running installers
+  --key-only             Install the local public SSH key and exit
 
-Advanced Options:
-    --password PASSWORD      SSH password (default: creality_2024)
-    --reset                  Factory reset device before installation
-    --reset-only            Factory reset device without installation
-    --preserve-stats         Backup/restore Moonraker stats (requires --reset or --reset-only)
-    --key-only               Only ensure SSH access and install public key
+Preservation flags (only valid with --reset or --reset-only):
+  --preserve-stats | --backup   Moonraker database
+  --preserve-timelapses         Timelapse media
+  --preserve-gcodes             Uploaded gcode files
 
-Backup & Restore Options:
-    --backup-only [DIR]      Only perform backup of Moonraker stats to specified directory (or current directory)
-    --restore-only DIR       Restore Moonraker stats from backup directory
-    --restore-backup DIR     Use specific backup directory during installation
+Backup mode (mutually exclusive with install/reset flows):
+  --backup-only [DIR]           Write selected components to DIR (or CWD)
+  --backup-moonraker            Include Moonraker stats
+  --backup-timelapses           Include timelapse files
+  --backup-gcodes               Include gcode files
 
-Examples:
-    # Full installation with reset and stats preservation
-    python3 fullinstaller.py 192.168.1.100 --reset --preserve-stats
+Restore mode (mutually exclusive with install/reset flows):
+  --restore-only DIR            Restore selected components from DIR
+  --restore-moonraker           Include Moonraker stats
+  --restore-timelapses          Include timelapse files
+  --restore-gcodes              Include gcode files
 
-    # Only backup Moonraker stats to current directory
-    python3 fullinstaller.py 192.168.1.100 --backup-only
+Targeted installer steps (defaults to all when omitted):
+  --run-bootstrap               Upload and run bootstrap scripts
+  --run-k2                      Execute k2-improvements script
+  --run-repo                    Clone and run install.sh from the repo
 
-    # Only backup Moonraker stats to specific directory
-    python3 fullinstaller.py 192.168.1.100 --backup-only /path/to/backup
-
-    # Factory reset only with backup
-    python3 fullinstaller.py 192.168.1.100 --reset-only --backup
-
-    # Only restore from specific backup
-    python3 fullinstaller.py 192.168.1.100 --restore-only /path/to/backup
-
-    # Install using existing backup for restore
-    python3 fullinstaller.py 192.168.1.100 --reset --preserve-stats --restore-backup /path/to/backup
+Notes:
+  * --preserve-* flags require a reset-driven workflow and manage capture/restore automatically.
+  * Standalone backup/restore modes cannot be combined with reset or preserve options.
+  * The GUI orchestrates these combinations; this reference exists so the CLI entry point stays aligned.
 """
 
 from __future__ import annotations
@@ -50,6 +49,7 @@ import os
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -122,6 +122,8 @@ class InstallerConfig:
     k2_script_path: str = "/mnt/UDISK/root/k2-improvements/gimme-the-jamin.sh"
     moonraker_database_dir: str = "/mnt/UDISK/root/printer_data/database"
     moonraker_service: str = "moonraker"
+    timelapse_directory: str = "/mnt/UDISK/root/timelapse"
+    gcodes_directory: str = "/mnt/UDISK/root/printer_data/gcodes"
 
 
 @dataclass
@@ -431,6 +433,8 @@ class PrinterInstaller:
         password: Optional[str] = None,
         reset: bool = False,
         preserve_stats: bool = False,
+        preserve_timelapses: bool = False,
+        preserve_gcodes: bool = False,
     ) -> None:
         if password is None:
             raise ValueError("Password is required")
@@ -440,6 +444,8 @@ class PrinterInstaller:
         self.password = password
         self.reset = reset
         self.preserve_stats = preserve_stats
+        self.preserve_timelapses = preserve_timelapses
+        self.preserve_gcodes = preserve_gcodes
         self.config = InstallerConfig()
 
         self.start_time = time.time()
@@ -450,6 +456,10 @@ class PrinterInstaller:
         self.bootstrap_tar = base_path / "bootstrap.tar.gz"
         self.moonraker_backup_dir: Optional[Path] = None
         self.moonraker_backup_files: dict[str, Path] = {}
+        self.timelapse_backup_dir: Optional[Path] = None
+        self.timelapse_backup_files: list[Path] = []
+        self.gcodes_backup_dir: Optional[Path] = None
+        self.gcodes_backup_files: list[Path] = []
 
         self.logger = logging.getLogger("printer_installer")
         self.setup_logging()
@@ -467,6 +477,9 @@ class PrinterInstaller:
         self.logger.handlers.clear()
 
         class _ColorFormatter(logging.Formatter):
+            def __init__(self) -> None:
+                super().__init__("%(asctime)s %(message)s", "%H:%M:%S")
+
             def format(self, record: logging.LogRecord) -> str:
                 msg = super().format(record)
                 # Prefix DEBUG messages with [VERBOSE] so GUI can filter them
@@ -484,7 +497,7 @@ class PrinterInstaller:
         console_handler.setLevel(
             logging.DEBUG
         )  # Send all messages to GUI for verbose buffer
-        console_handler.setFormatter(_ColorFormatter("%(message)s"))
+        console_handler.setFormatter(_ColorFormatter())
         # Force UTF-8 encoding on the stream with error handling
         if hasattr(console_handler.stream, "reconfigure"):
             console_handler.stream.reconfigure(encoding="utf-8", errors="ignore")
@@ -513,6 +526,135 @@ class PrinterInstaller:
         self.logger.info(
             f"=== STEP {step_number}: {title} ===",
             extra={"is_step": True},
+        )
+
+    def _format_size(self, num_bytes: int) -> str:
+        if num_bytes <= 0:
+            return "0 B"
+        units = ("B", "KB", "MB", "GB", "TB")
+        value = float(num_bytes)
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024
+            idx += 1
+        if idx == 0:
+            return f"{int(value)} {units[idx]}"
+        if value >= 100:
+            return f"{value:,.0f} {units[idx]}"
+        return f"{value:.1f} {units[idx]}"
+
+    @staticmethod
+    def _format_file_count(count: int) -> str:
+        return f"{count} file{'s' if count != 1 else ''}"
+
+    class _TransferMonitor:
+        UPDATE_INTERVAL = 10.0
+
+        def __init__(
+            self,
+            owner: "PrinterInstaller",
+            *,
+            verb: str,
+            component: str,
+            total_files: int,
+            total_bytes: int,
+        ) -> None:
+            self._owner = owner
+            self._verb = verb
+            self._component = component
+            self._total_files = total_files
+            self._total_bytes = max(total_bytes, 0)
+            self._completed_files = 0
+            self._completed_bytes = 0
+            self._current_file_size = 0
+            self._last_emit = time.monotonic()
+            self._last_percent = -1
+            self._last_overall = 0
+            self._active = self._total_bytes > 0
+            self._emitted_complete = False
+
+        def start_file(self, filename: str, file_size: int) -> None:
+            if not self._active:
+                return
+            self._current_file_size = max(file_size, 0)
+            self._current_transferred = 0
+
+        def callback(self, transferred: int, total: int) -> None:
+            if not self._active:
+                return
+            self._current_transferred = max(transferred, 0)
+            overall = self._completed_bytes + self._current_transferred
+            if self._total_bytes <= 0:
+                return
+            percent = int((min(overall, self._total_bytes) / self._total_bytes) * 100)
+            now = time.monotonic()
+            should_emit = False
+            if percent >= 100:
+                self._emitted_complete = True
+                self._last_percent = percent
+                self._last_overall = overall
+                self._last_emit = now
+                return
+            if (
+                (now - self._last_emit) >= self.UPDATE_INTERVAL
+                and percent > self._last_percent
+                and overall > self._last_overall
+            ):
+                should_emit = True
+            if should_emit:
+                transferred_str = self._owner._format_size(overall)
+                total_str = self._owner._format_size(self._total_bytes)
+                self._owner.log(
+                    f"{self._verb} {self._component} – {percent}% ({transferred_str} / {total_str})"
+                )
+                self._last_emit = now
+                self._last_percent = percent
+                self._last_overall = overall
+
+        def finish_file(self) -> None:
+            if not self._active:
+                return
+            self._completed_files += 1
+            self._completed_bytes += self._current_file_size
+            self._current_file_size = 0
+            self._current_transferred = 0
+            if self._completed_bytes >= self._total_bytes:
+                self.complete()
+
+        def abort_current_file(self) -> None:
+            if not self._active:
+                return
+            self._total_bytes = max(self._total_bytes - self._current_file_size, 0)
+            self._total_files = max(self._total_files - 1, 0)
+            self._current_file_size = 0
+            self._current_transferred = 0
+            self._last_overall = min(self._last_overall, self._completed_bytes)
+            if self._total_bytes == 0:
+                self._active = False
+
+        def complete(self) -> None:
+            if not self._active or self._emitted_complete:
+                return
+            self._last_overall = self._total_bytes
+            self._last_percent = 100
+            self._emitted_complete = True
+
+    def _create_transfer_monitor(
+        self,
+        *,
+        verb: str,
+        component: str,
+        total_files: int,
+        total_bytes: int,
+    ) -> Optional["_TransferMonitor"]:
+        if total_files <= 0 or total_bytes <= 0:
+            return None
+        return self._TransferMonitor(
+            self,
+            verb=verb,
+            component=component,
+            total_files=total_files,
+            total_bytes=total_bytes,
         )
 
     # -- SSH helpers -----------------------------------------------------
@@ -677,6 +819,97 @@ class PrinterInstaller:
 
     # -- Moonraker data --------------------------------------------------
 
+    def query_backup_sizes(self) -> dict[str, dict[str, int | bool]]:
+        """Query backup sizes from printer without logging. Returns dict with moonraker, timelapses, and gcodes info.
+        Raises SSHConnectionError if connection fails."""
+        result = {
+            "moonraker": {"count": 0, "size_kb": 0, "exists": False},
+            "timelapses": {"count": 0, "size_kb": 0, "exists": False},
+            "gcodes": {"count": 0, "size_kb": 0, "exists": False},
+        }
+
+        try:
+            self.executor.connect()
+        except SSHConnectionError:
+            # Re-raise connection errors so caller knows connection failed
+            raise
+        except Exception:
+            # Other connection errors should also be raised
+            raise SSHConnectionError("Failed to establish SSH connection")
+
+        # Query Moonraker database files
+        try:
+            # Only count the files that are actually backed up (exclude lock.mdb)
+            count_result = self.executor.run(
+                f"ls -1 {self.config.moonraker_database_dir}/data.mdb "
+                f"{self.config.moonraker_database_dir}/moonraker-sql.db 2>/dev/null | wc -l",
+                timeout=5,
+            )
+            if count_result.ok and count_result.stdout.strip().isdigit():
+                result["moonraker"]["count"] = int(count_result.stdout.strip())
+                result["moonraker"]["exists"] = result["moonraker"]["count"] > 0
+
+            if result["moonraker"]["exists"]:
+                # Only calculate size for files that are actually backed up (exclude lock.mdb)
+                size_result = self.executor.run(
+                    f"du -sk {self.config.moonraker_database_dir}/data.mdb "
+                    f"{self.config.moonraker_database_dir}/moonraker-sql.db 2>/dev/null | "
+                    "awk '{sum+=$1} END {print sum}'",
+                    timeout=5,
+                )
+                if size_result.ok and size_result.stdout.strip().isdigit():
+                    result["moonraker"]["size_kb"] = int(size_result.stdout.strip())
+        except Exception:
+            pass  # Silent failure for individual queries
+
+        # Query timelapse files
+        try:
+            # Check if directory exists and get count
+            dir_check = self.executor.run(
+                f"test -d {self.config.timelapse_directory} && "
+                f"ls -1 {self.config.timelapse_directory} 2>/dev/null | wc -l || echo 0",
+                timeout=5,
+            )
+            if dir_check.ok and dir_check.stdout.strip().isdigit():
+                count = int(dir_check.stdout.strip())
+                result["timelapses"]["count"] = count
+                result["timelapses"]["exists"] = count > 0
+
+            if result["timelapses"]["exists"]:
+                size_result = self.executor.run(
+                    f"du -sk {self.config.timelapse_directory} 2>/dev/null | awk '{{print $1}}'",
+                    timeout=5,
+                )
+                if size_result.ok and size_result.stdout.strip().isdigit():
+                    result["timelapses"]["size_kb"] = int(size_result.stdout.strip())
+        except Exception:
+            pass  # Silent failure for individual queries
+
+        # Query gcode files
+        try:
+            # Check if directory exists and get count
+            dir_check = self.executor.run(
+                f"test -d {self.config.gcodes_directory} && "
+                f"ls -1 {self.config.gcodes_directory} 2>/dev/null | wc -l || echo 0",
+                timeout=5,
+            )
+            if dir_check.ok and dir_check.stdout.strip().isdigit():
+                count = int(dir_check.stdout.strip())
+                result["gcodes"]["count"] = count
+                result["gcodes"]["exists"] = count > 0
+
+            if result["gcodes"]["exists"]:
+                size_result = self.executor.run(
+                    f"du -sk {self.config.gcodes_directory} 2>/dev/null | awk '{{print $1}}'",
+                    timeout=5,
+                )
+                if size_result.ok and size_result.stdout.strip().isdigit():
+                    result["gcodes"]["size_kb"] = int(size_result.stdout.strip())
+        except Exception:
+            pass  # Silent failure for individual queries
+
+        return result
+
     def backup_moonraker_stats(
         self,
         *,
@@ -687,12 +920,11 @@ class PrinterInstaller:
         if not self.preserve_stats and not force:
             return
 
-        msg = (
-            "Backing up Moonraker stats before reset..."
+        start_message = (
+            "Backing up Moonraker stats before reset"
             if self.preserve_stats and not force
-            else "Backing up Moonraker stats..."
+            else "Backing up Moonraker stats"
         )
-        self.log(msg)
         self.ensure_ssh_access()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -705,7 +937,7 @@ class PrinterInstaller:
             base_dir = Path.cwd()
 
         self.moonraker_backup_dir = (
-            base_dir / f"moonraker_backup_{self.printer_ip}_{timestamp}"
+            base_dir / f"printer_backup_{self.printer_ip}_{timestamp}"
         )
         self.moonraker_backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -718,11 +950,30 @@ class PrinterInstaller:
         failed: list[str] = []
 
         with self.executor.sftp() as sftp:
+            file_infos: list[tuple[str, Path, int]] = []
+            total_bytes = 0
             for remote_file in targets:
-                local_path = self.moonraker_backup_dir / Path(remote_file).name
+                local_name = Path(remote_file).name
+                size = 0
+                try:
+                    attrs = sftp.stat(remote_file)
+                    if not stat.S_ISDIR(getattr(attrs, "st_mode", 0)):
+                        size = getattr(attrs, "st_size", 0) or 0
+                except IOError:
+                    size = 0
+                file_infos.append((remote_file, local_name, size))
+                total_bytes += size
+
+            self.log(
+                f"{start_message} ({self._format_file_count(len(file_infos))}, "
+                f"{self._format_size(total_bytes)})..."
+            )
+
+            for remote_file, local_name, _ in file_infos:
+                local_path = self.moonraker_backup_dir / local_name
                 try:
                     sftp.get(remote_file, str(local_path))
-                    self.moonraker_backup_files[Path(remote_file).name] = local_path
+                    self.moonraker_backup_files[local_name] = local_path
                     succeeded += 1
                 except IOError as exc:
                     failed.append(remote_file)
@@ -755,15 +1006,30 @@ class PrinterInstaller:
 
         self.executor.run(f"mkdir -p {self.config.moonraker_database_dir}")
 
+        file_entries: list[tuple[str, Path]] = []
+        total_bytes = 0
+        for name, local_path in self.moonraker_backup_files.items():
+            if not local_path.exists():
+                self.file_log(
+                    f"Missing local backup file; skipping: {local_path}",
+                    "WARNING",
+                )
+                continue
+            total_bytes += local_path.stat().st_size
+            file_entries.append((name, local_path))
+
+        if not file_entries:
+            self.log("No Moonraker stats files were restored.", "WARNING")
+            return
+
+        self.log(
+            f"Restoring Moonraker stats ({self._format_file_count(len(file_entries))}, "
+            f"{self._format_size(total_bytes)})..."
+        )
+
         restored = 0
         with self.executor.sftp() as sftp:
-            for name, local_path in self.moonraker_backup_files.items():
-                if not local_path.exists():
-                    self.file_log(
-                        f"Missing local backup file; skipping: {local_path}",
-                        "WARNING",
-                    )
-                    continue
+            for name, local_path in file_entries:
                 remote_path = f"{self.config.moonraker_database_dir}/{name}"
                 try:
                     sftp.put(str(local_path), remote_path)
@@ -780,6 +1046,458 @@ class PrinterInstaller:
             self.log("No Moonraker stats files were restored.", "WARNING")
         else:
             self.log(f"Restored {restored} Moonraker stats file(s)")
+
+    # -- Timelapse files -------------------------------------------------
+
+    def backup_timelapse_files(
+        self,
+        *,
+        force: bool = False,
+        backup_dir: Optional[Path] = None,
+        use_temp: bool = False,
+    ) -> None:
+        """Backup timelapse files from the printer."""
+        if not self.preserve_timelapses and not force:
+            return
+
+        self.ensure_ssh_access()
+
+        # Check if timelapse directory exists
+        try:
+            result = self.executor.run(
+                f"test -d {self.config.timelapse_directory} && echo exists",
+                timeout=10,
+            )
+            if "exists" not in result.stdout:
+                self.log("No timelapse directory found; skipping timelapse backup")
+                return
+        except CommandExecutionError:
+            self.log("No timelapse directory found; skipping timelapse backup")
+            return
+
+        # Determine backup directory (same logic as moonraker stats)
+        if backup_dir:
+            base_dir = backup_dir
+        elif use_temp:
+            base_dir = Path(tempfile.gettempdir())
+        else:
+            base_dir = Path.cwd()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Use existing moonraker backup dir if available, otherwise create new
+        if self.moonraker_backup_dir:
+            self.timelapse_backup_dir = self.moonraker_backup_dir / "timelapse"
+        else:
+            backup_root = base_dir / f"printer_backup_{self.printer_ip}_{timestamp}"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            self.timelapse_backup_dir = backup_root / "timelapse"
+
+        self.timelapse_backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # List files in timelapse directory
+        try:
+            result = self.executor.run(
+                f"ls -1 {self.config.timelapse_directory}",
+                timeout=30,
+            )
+            files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
+
+            if not files:
+                self.log("No timelapse files found to backup")
+                return
+
+        except CommandExecutionError:
+            self.log("No timelapse files found to backup")
+            return
+
+        succeeded = 0
+        failed: list[str] = []
+        monitor: Optional[PrinterInstaller._TransferMonitor] = None
+
+        with self.executor.sftp() as sftp:
+            file_infos: list[tuple[str, str, int]] = []
+            total_bytes = 0
+            for filename in files:
+                remote_path = f"{self.config.timelapse_directory}/{filename}"
+                try:
+                    attrs = sftp.stat(remote_path)
+                except IOError as exc:
+                    self.file_log(
+                        f"Failed to inspect timelapse file {filename}: {exc}",
+                        "WARNING",
+                    )
+                    continue
+                if stat.S_ISDIR(getattr(attrs, "st_mode", 0)):
+                    continue
+                size = getattr(attrs, "st_size", 0) or 0
+                file_infos.append((filename, remote_path, size))
+                total_bytes += size
+
+            if not file_infos:
+                self.log("No timelapse files found to backup")
+                return
+
+            self.log(
+                f"Backing up timelapse files ({self._format_file_count(len(file_infos))}, "
+                f"{self._format_size(total_bytes)})..."
+            )
+            monitor = self._create_transfer_monitor(
+                verb="Backing up",
+                component="timelapse files",
+                total_files=len(file_infos),
+                total_bytes=total_bytes,
+            )
+
+            for filename, remote_path, file_size in file_infos:
+                local_path = self.timelapse_backup_dir / filename
+                if monitor:
+                    monitor.start_file(filename, file_size)
+                try:
+                    if monitor and file_size:
+                        sftp.get(
+                            remote_path,
+                            str(local_path),
+                            callback=monitor.callback,
+                        )
+                    else:
+                        sftp.get(remote_path, str(local_path))
+                    if monitor:
+                        monitor.finish_file()
+                    self.timelapse_backup_files.append(local_path)
+                    succeeded += 1
+                except IOError as exc:
+                    if monitor:
+                        monitor.abort_current_file()
+                    failed.append(filename)
+                    self.file_log(f"Failed to backup {filename}: {exc}", "WARNING")
+
+        if monitor:
+            monitor.complete()
+
+        if failed:
+            self.log(
+                f"Warning: Failed to backup {len(failed)} timelapse file(s)", "WARNING"
+            )
+
+        self.file_log(
+            f"Successfully backed up {succeeded} timelapse file(s) to {self.timelapse_backup_dir}"
+        )
+        self.log(f"Backed up {succeeded} timelapse file(s)")
+
+    def restore_timelapse_files(self, *, force: bool = False) -> None:
+        """Restore timelapse files to the printer."""
+        if not self.preserve_timelapses and not force:
+            return
+        if not self.timelapse_backup_files:
+            self.file_log("No timelapse backup files found; skipping restore.")
+            return
+
+        self.file_log("Restoring timelapse files to device...")
+        self.ensure_ssh_access()
+
+        # Create timelapse directory if it doesn't exist
+        self.executor.run(
+            f"mkdir -p {self.config.timelapse_directory}",
+            timeout=10,
+        )
+
+        file_entries: list[tuple[Path, int]] = []
+        total_bytes = 0
+        for local_path in self.timelapse_backup_files:
+            if not local_path.exists():
+                self.file_log(
+                    f"Missing local backup file; skipping: {local_path}",
+                    "WARNING",
+                )
+                continue
+            size = local_path.stat().st_size
+            file_entries.append((local_path, size))
+            total_bytes += size
+
+        if not file_entries:
+            self.log("No timelapse files were restored.", "WARNING")
+            return
+
+        self.log(
+            f"Restoring timelapse files ({self._format_file_count(len(file_entries))}, "
+            f"{self._format_size(total_bytes)})..."
+        )
+
+        monitor = self._create_transfer_monitor(
+            verb="Restoring",
+            component="timelapse files",
+            total_files=len(file_entries),
+            total_bytes=total_bytes,
+        )
+
+        restored = 0
+        failed: list[str] = []
+
+        with self.executor.sftp() as sftp:
+            for local_path, size in file_entries:
+                remote_path = f"{self.config.timelapse_directory}/{local_path.name}"
+                if monitor:
+                    monitor.start_file(local_path.name, size)
+                try:
+                    if monitor and size:
+                        sftp.put(
+                            str(local_path),
+                            remote_path,
+                            callback=monitor.callback,
+                        )
+                    else:
+                        sftp.put(str(local_path), remote_path)
+                    if monitor:
+                        monitor.finish_file()
+                    restored += 1
+                except IOError as exc:
+                    if monitor:
+                        monitor.abort_current_file()
+                    failed.append(local_path.name)
+                    self.file_log(
+                        f"Failed to restore {local_path.name}: {exc}", "ERROR"
+                    )
+
+        if monitor:
+            monitor.complete()
+
+        if failed:
+            self.log(
+                f"Warning: Failed to restore {len(failed)} timelapse file(s)", "WARNING"
+            )
+
+        if restored == 0:
+            self.log("No timelapse files were restored.", "WARNING")
+        else:
+            self.log(f"Restored {restored} timelapse file(s)")
+
+    # -- GCode files backup/restore -------------------------------------
+
+    def backup_gcode_files(
+        self,
+        *,
+        force: bool = False,
+        backup_dir: Optional[Path] = None,
+        use_temp: bool = False,
+    ) -> None:
+        """Backup gcode files from the printer."""
+        if not self.preserve_gcodes and not force:
+            return
+
+        self.file_log("Backing up gcode files from device...")
+        self.ensure_ssh_access()
+
+        # Check if gcodes directory exists
+        try:
+            result = self.executor.run(
+                f"test -d {self.config.gcodes_directory} && echo exists",
+                timeout=10,
+            )
+            if "exists" not in result.stdout:
+                self.log("No gcodes directory found on device")
+                return
+        except CommandExecutionError:
+            self.log("No gcodes directory found on device")
+            return
+
+        # Determine backup directory: explicit path > temp > current working directory
+        if backup_dir:
+            base_dir = backup_dir
+        elif use_temp:
+            base_dir = Path(tempfile.gettempdir())
+        else:
+            base_dir = Path.cwd()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Use existing backup dir if available, otherwise create new
+        if self.moonraker_backup_dir:
+            self.gcodes_backup_dir = self.moonraker_backup_dir / "gcodes"
+        else:
+            backup_root = base_dir / f"printer_backup_{self.printer_ip}_{timestamp}"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            self.gcodes_backup_dir = backup_root / "gcodes"
+
+        self.gcodes_backup_dir.mkdir(parents=True, exist_ok=True)
+
+        # List files in gcodes directory
+        try:
+            result = self.executor.run(
+                f"ls -1 {self.config.gcodes_directory}",
+                timeout=30,
+            )
+            files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
+
+            if not files:
+                self.log("No gcode files found to backup")
+                return
+
+        except CommandExecutionError:
+            self.log("No gcode files found to backup")
+            return
+
+        succeeded = 0
+        failed: list[str] = []
+        monitor: Optional[PrinterInstaller._TransferMonitor] = None
+
+        with self.executor.sftp() as sftp:
+            file_infos: list[tuple[str, str, int]] = []
+            total_bytes = 0
+            for filename in files:
+                remote_path = f"{self.config.gcodes_directory}/{filename}"
+                try:
+                    attrs = sftp.stat(remote_path)
+                except IOError as exc:
+                    self.file_log(
+                        f"Failed to inspect gcode file {filename}: {exc}",
+                        "WARNING",
+                    )
+                    continue
+                if stat.S_ISDIR(getattr(attrs, "st_mode", 0)):
+                    continue
+                size = getattr(attrs, "st_size", 0) or 0
+                file_infos.append((filename, remote_path, size))
+                total_bytes += size
+
+            if not file_infos:
+                self.log("No gcode files found to backup")
+                return
+
+            self.log(
+                f"Backing up gcode files ({self._format_file_count(len(file_infos))}, "
+                f"{self._format_size(total_bytes)})..."
+            )
+
+            monitor = self._create_transfer_monitor(
+                verb="Backing up",
+                component="gcode files",
+                total_files=len(file_infos),
+                total_bytes=total_bytes,
+            )
+
+            for filename, remote_path, size in file_infos:
+                local_path = self.gcodes_backup_dir / filename
+                if monitor:
+                    monitor.start_file(filename, size)
+                try:
+                    if monitor and size:
+                        sftp.get(
+                            remote_path,
+                            str(local_path),
+                            callback=monitor.callback,
+                        )
+                    else:
+                        sftp.get(remote_path, str(local_path))
+                    if monitor:
+                        monitor.finish_file()
+                    self.gcodes_backup_files.append(local_path)
+                    succeeded += 1
+                except IOError as exc:
+                    if monitor:
+                        monitor.abort_current_file()
+                    failed.append(filename)
+                    self.file_log(f"Failed to backup {filename}: {exc}", "WARNING")
+
+        if monitor:
+            monitor.complete()
+
+        if failed:
+            self.log(
+                f"Warning: Failed to backup {len(failed)} gcode file(s)", "WARNING"
+            )
+
+        self.file_log(
+            f"Successfully backed up {succeeded} gcode file(s) to {self.gcodes_backup_dir}"
+        )
+        self.log(f"Backed up {succeeded} gcode file(s)")
+
+    def restore_gcode_files(self, *, force: bool = False) -> None:
+        """Restore gcode files to the printer."""
+        if not self.preserve_gcodes and not force:
+            return
+        if not self.gcodes_backup_files:
+            self.file_log("No gcode backup files found; skipping restore.")
+            return
+
+        self.file_log("Restoring gcode files to device...")
+        self.ensure_ssh_access()
+
+        # Create gcodes directory if it doesn't exist
+        self.executor.run(
+            f"mkdir -p {self.config.gcodes_directory}",
+            timeout=10,
+        )
+
+        file_entries: list[tuple[Path, int]] = []
+        total_bytes = 0
+        for local_path in self.gcodes_backup_files:
+            if not local_path.exists():
+                self.file_log(
+                    f"Missing local backup file; skipping: {local_path}",
+                    "WARNING",
+                )
+                continue
+            size = local_path.stat().st_size
+            file_entries.append((local_path, size))
+            total_bytes += size
+
+        if not file_entries:
+            self.log("No gcode files were restored.", "WARNING")
+            return
+
+        self.log(
+            f"Restoring gcode files ({self._format_file_count(len(file_entries))}, "
+            f"{self._format_size(total_bytes)})..."
+        )
+
+        monitor = self._create_transfer_monitor(
+            verb="Restoring",
+            component="gcode files",
+            total_files=len(file_entries),
+            total_bytes=total_bytes,
+        )
+
+        restored = 0
+        failed: list[str] = []
+
+        with self.executor.sftp() as sftp:
+            for local_path, size in file_entries:
+                remote_path = f"{self.config.gcodes_directory}/{local_path.name}"
+                if monitor:
+                    monitor.start_file(local_path.name, size)
+                try:
+                    if monitor and size:
+                        sftp.put(
+                            str(local_path),
+                            remote_path,
+                            callback=monitor.callback,
+                        )
+                    else:
+                        sftp.put(str(local_path), remote_path)
+                    if monitor:
+                        monitor.finish_file()
+                    restored += 1
+                except IOError as exc:
+                    if monitor:
+                        monitor.abort_current_file()
+                    failed.append(local_path.name)
+                    self.file_log(
+                        f"Failed to restore {local_path.name}: {exc}", "ERROR"
+                    )
+
+        if monitor:
+            monitor.complete()
+
+        if failed:
+            self.log(
+                f"Warning: Failed to restore {len(failed)} gcode file(s)", "WARNING"
+            )
+
+        if restored == 0:
+            self.log("No gcode files were restored.", "WARNING")
+        else:
+            self.log(f"Restored {restored} gcode file(s)")
 
     # -- Installation steps ---------------------------------------------
 
@@ -986,6 +1704,24 @@ class PrinterInstaller:
                     self.log(f"Moonraker stats restore failed: {exc}", "ERROR")
                 step_number += 1
 
+            if self.preserve_timelapses:
+                self.log_step(step_number, "Restoring timelapse files")
+                try:
+                    self.restore_timelapse_files()
+                    self.log("Timelapse files restore completed")
+                except InstallerError as exc:
+                    self.log(f"Timelapse files restore failed: {exc}", "ERROR")
+                step_number += 1
+
+            if self.preserve_gcodes:
+                self.log_step(step_number, "Restoring gcode files")
+                try:
+                    self.restore_gcode_files()
+                    self.log("GCode files restore completed")
+                except InstallerError as exc:
+                    self.log(f"GCode files restore failed: {exc}", "ERROR")
+                step_number += 1
+
             total_time = time.time() - self.start_time
             minutes = int(total_time // 60)
             seconds = int(total_time % 60)
@@ -1064,6 +1800,16 @@ Examples:
         help="Backup and restore Moonraker stats across factory reset (requires --reset or --reset-only)",
     )
     parser.add_argument(
+        "--preserve-timelapses",
+        action="store_true",
+        help="Backup and restore timelapse files across factory reset (requires --reset or --reset-only)",
+    )
+    parser.add_argument(
+        "--preserve-gcodes",
+        action="store_true",
+        help="Backup and restore gcode files across factory reset (requires --reset or --reset-only)",
+    )
+    parser.add_argument(
         "--key-only",
         dest="key_only",
         action="store_true",
@@ -1075,17 +1821,47 @@ Examples:
         const=None,
         default=False,
         metavar="BACKUP_DIR",
-        help="Only perform backup of Moonraker stats to specified directory (or current directory if not specified)",
+        help="Perform backup to specified directory (or current directory if not specified). Use with --backup-moonraker and/or --backup-timelapses to select components (defaults to both if neither specified).",
     )
     parser.add_argument(
         "--restore-only",
         metavar="BACKUP_DIR",
-        help="Restore Moonraker stats from specified backup directory without installation",
+        help="Restore from specified backup directory without installation. Use with --restore-moonraker and/or --restore-timelapses to select components (defaults to both if neither specified).",
     )
     parser.add_argument(
         "--restore-backup",
         metavar="BACKUP_DIR",
         help="Specify backup directory to use for restore during installation",
+    )
+    parser.add_argument(
+        "--backup-moonraker",
+        action="store_true",
+        help="Include Moonraker stats in backup (use with --backup-only)",
+    )
+    parser.add_argument(
+        "--backup-timelapses",
+        action="store_true",
+        help="Include timelapse files in backup (use with --backup-only)",
+    )
+    parser.add_argument(
+        "--backup-gcodes",
+        action="store_true",
+        help="Include gcode files in backup (use with --backup-only)",
+    )
+    parser.add_argument(
+        "--restore-moonraker",
+        action="store_true",
+        help="Include Moonraker stats in restore (use with --restore-only)",
+    )
+    parser.add_argument(
+        "--restore-timelapses",
+        action="store_true",
+        help="Include timelapse files in restore (use with --restore-only)",
+    )
+    parser.add_argument(
+        "--restore-gcodes",
+        action="store_true",
+        help="Include gcode files in restore (use with --restore-only)",
     )
     parser.add_argument(
         "--run-bootstrap",
@@ -1124,11 +1900,38 @@ Examples:
 
     # Forbid mixing modes with install modifiers
     if args.key_only or args.backup_only is not False or args.restore_only:
-        if args.reset or args.reset_only or args.preserve_stats or args.restore_backup:
+        if (
+            args.reset
+            or args.reset_only
+            or args.preserve_stats
+            or args.preserve_timelapses
+            or args.preserve_gcodes
+            or args.restore_backup
+        ):
             print(
-                "ERROR: --key-only, --backup-only, and --restore-only cannot be combined with --reset, --reset-only, --preserve-stats, or --restore-backup."
+                "ERROR: Standalone backup/restore modes cannot be combined with --reset, --reset-only, --preserve-stats, --preserve-timelapses, --preserve-gcodes, or --restore-backup."
             )
             sys.exit(2)
+
+    # Validate component flags are only used with their respective operations
+    if args.backup_moonraker and args.backup_only is False:
+        print("ERROR: --backup-moonraker can only be used with --backup-only.")
+        sys.exit(2)
+    if args.backup_timelapses and args.backup_only is False:
+        print("ERROR: --backup-timelapses can only be used with --backup-only.")
+        sys.exit(2)
+    if args.backup_gcodes and args.backup_only is False:
+        print("ERROR: --backup-gcodes can only be used with --backup-only.")
+        sys.exit(2)
+    if args.restore_moonraker and not args.restore_only:
+        print("ERROR: --restore-moonraker can only be used with --restore-only.")
+        sys.exit(2)
+    if args.restore_timelapses and not args.restore_only:
+        print("ERROR: --restore-timelapses can only be used with --restore-only.")
+        sys.exit(2)
+    if args.restore_gcodes and not args.restore_only:
+        print("ERROR: --restore-gcodes can only be used with --restore-only.")
+        sys.exit(2)
 
     if args.reset_only:
         if args.reset:
@@ -1145,30 +1948,98 @@ Examples:
         )
         sys.exit(2)
 
+    # --preserve-timelapses requires --reset or --reset-only
+    if args.preserve_timelapses and not (args.reset or args.reset_only):
+        print(
+            "ERROR: --preserve-timelapses can only be used together with --reset or --reset-only."
+        )
+        sys.exit(2)
+
+    # --preserve-gcodes requires --reset or --reset-only
+    if args.preserve_gcodes and not (args.reset or args.reset_only):
+        print(
+            "ERROR: --preserve-gcodes can only be used together with --reset or --reset-only."
+        )
+        sys.exit(2)
+
     # --preserve-stats conflicts with --restore-backup
     if args.preserve_stats and args.restore_backup:
         print("ERROR: --preserve-stats cannot be used together with --restore-backup.")
         sys.exit(2)
 
     # Validate provided backup directories exist and are complete
-    def _validate_backup_dir(path_str: str) -> None:
+    def _validate_backup_dir(
+        path_str: str,
+        *,
+        requires_moonraker: bool = False,
+        requires_timelapses: bool = False,
+        requires_gcodes: bool = False,
+    ) -> None:
         backup_dir = Path(path_str)
         if not backup_dir.exists() or not backup_dir.is_dir():
             print(f"ERROR: Backup directory does not exist: {backup_dir}")
             sys.exit(2)
-        required_files = ["data.mdb", "moonraker-sql.db"]
-        missing = [name for name in required_files if not (backup_dir / name).exists()]
-        if missing:
-            print(
-                f"ERROR: Backup directory is missing required files: {', '.join(missing)} in {backup_dir}"
-            )
-            sys.exit(2)
+
+        # Only validate if requirements are specified
+        if requires_moonraker:
+            required_files = ["data.mdb", "moonraker-sql.db"]
+            missing = [
+                name for name in required_files if not (backup_dir / name).exists()
+            ]
+            if missing:
+                print(
+                    f"ERROR: Backup directory is missing required Moonraker files: {', '.join(missing)} in {backup_dir}"
+                )
+                sys.exit(2)
+
+        if requires_timelapses:
+            timelapse_dir = backup_dir / "timelapse"
+            if not timelapse_dir.exists() or not timelapse_dir.is_dir():
+                print(
+                    f"ERROR: Backup directory is missing timelapse subdirectory: {timelapse_dir}"
+                )
+                sys.exit(2)
+
+        if requires_gcodes:
+            gcodes_dir = backup_dir / "gcodes"
+            if not gcodes_dir.exists() or not gcodes_dir.is_dir():
+                print(
+                    f"ERROR: Backup directory is missing gcodes subdirectory: {gcodes_dir}"
+                )
+                sys.exit(2)
 
     if args.restore_only:
-        _validate_backup_dir(args.restore_only)
+        # Validate based on component flags (default to all if none specified)
+        restore_moonraker = args.restore_moonraker or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+        restore_timelapses = args.restore_timelapses or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+        restore_gcodes = args.restore_gcodes or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+        _validate_backup_dir(
+            args.restore_only,
+            requires_moonraker=restore_moonraker,
+            requires_timelapses=restore_timelapses,
+            requires_gcodes=restore_gcodes,
+        )
 
     if args.restore_backup:
-        _validate_backup_dir(args.restore_backup)
+        # For restore-backup during installation, validate all components exist
+        _validate_backup_dir(
+            args.restore_backup,
+            requires_moonraker=True,
+            requires_timelapses=True,
+            requires_gcodes=True,
+        )
 
     installer = PrinterInstaller(
         printer_ip=args.printer_ip,
@@ -1176,6 +2047,8 @@ Examples:
         password=args.password,
         reset=args.reset or args.reset_only,
         preserve_stats=args.preserve_stats,
+        preserve_timelapses=args.preserve_timelapses,
+        preserve_gcodes=args.preserve_gcodes,
     )
 
     if args.key_only:
@@ -1189,26 +2062,127 @@ Examples:
     if args.backup_only is not False:
         installer.ensure_ssh_access()
         backup_dir = Path(args.backup_only) if args.backup_only else None
-        installer.backup_moonraker_stats(force=True, backup_dir=backup_dir)
-        print(
-            f"Backup completed successfully. Saved to: {installer.moonraker_backup_dir}"
+
+        # Determine which components to backup (default to all if none specified)
+        backup_moonraker = args.backup_moonraker or (
+            not args.backup_moonraker
+            and not args.backup_timelapses
+            and not args.backup_gcodes
         )
+        backup_timelapses = args.backup_timelapses or (
+            not args.backup_moonraker
+            and not args.backup_timelapses
+            and not args.backup_gcodes
+        )
+        backup_gcodes = args.backup_gcodes or (
+            not args.backup_moonraker
+            and not args.backup_timelapses
+            and not args.backup_gcodes
+        )
+
+        components_backed_up = []
+
+        if backup_moonraker:
+            installer.backup_moonraker_stats(force=True, backup_dir=backup_dir)
+            components_backed_up.append("Moonraker stats")
+
+        if backup_timelapses:
+            installer.backup_timelapse_files(force=True, backup_dir=backup_dir)
+            components_backed_up.append("timelapses")
+
+        if backup_gcodes:
+            installer.backup_gcode_files(force=True, backup_dir=backup_dir)
+            components_backed_up.append("gcodes")
+
+        if components_backed_up:
+            print(
+                f"Backup completed successfully. Backed up: {', '.join(components_backed_up)}"
+            )
+            if installer.moonraker_backup_dir:
+                print(f"Saved to: {installer.moonraker_backup_dir}")
+            elif installer.timelapse_backup_dir:
+                print(f"Saved to: {installer.timelapse_backup_dir}")
+            elif installer.gcodes_backup_dir:
+                print(f"Saved to: {installer.gcodes_backup_dir}")
+        else:
+            print("No components selected for backup.")
+            sys.exit(1)
         sys.exit(0)
 
     if args.restore_only:
         installer.ensure_ssh_access()
-        installer.moonraker_backup_dir = Path(args.restore_only)
-        installer.moonraker_backup_files = {
-            "data.mdb": installer.moonraker_backup_dir / "data.mdb",
-            "moonraker-sql.db": installer.moonraker_backup_dir / "moonraker-sql.db",
-        }
-        installer.restore_moonraker_stats(force=True)
-        print("Restore completed successfully.")
+        backup_dir = Path(args.restore_only)
+
+        # Determine which components to restore (default to all if none specified)
+        restore_moonraker = args.restore_moonraker or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+        restore_timelapses = args.restore_timelapses or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+        restore_gcodes = args.restore_gcodes or (
+            not args.restore_moonraker
+            and not args.restore_timelapses
+            and not args.restore_gcodes
+        )
+
+        components_restored = []
+
+        if restore_moonraker:
+            installer.moonraker_backup_dir = backup_dir
+            installer.moonraker_backup_files = {
+                "data.mdb": backup_dir / "data.mdb",
+                "moonraker-sql.db": backup_dir / "moonraker-sql.db",
+            }
+            installer.restore_moonraker_stats(force=True)
+            components_restored.append("Moonraker stats")
+
+        if restore_timelapses:
+            timelapse_dir = backup_dir / "timelapse"
+            if timelapse_dir.exists():
+                installer.timelapse_backup_dir = timelapse_dir
+                installer.timelapse_backup_files = list(timelapse_dir.glob("*"))
+                installer.restore_timelapse_files(force=True)
+                components_restored.append("timelapses")
+            else:
+                installer.log(
+                    "No timelapse directory found in backup; skipping timelapse restore.",
+                    "WARNING",
+                )
+
+        if restore_gcodes:
+            gcodes_dir = backup_dir / "gcodes"
+            if gcodes_dir.exists():
+                installer.gcodes_backup_dir = gcodes_dir
+                installer.gcodes_backup_files = list(gcodes_dir.glob("*"))
+                installer.restore_gcode_files(force=True)
+                components_restored.append("gcodes")
+            else:
+                installer.log(
+                    "No gcodes directory found in backup; skipping gcodes restore.",
+                    "WARNING",
+                )
+
+        if components_restored:
+            print(
+                f"Restore completed successfully. Restored: {', '.join(components_restored)}"
+            )
+        else:
+            print("No components were restored.")
+            sys.exit(1)
         sys.exit(0)
 
     if args.reset_only:
         if args.preserve_stats:
             installer.backup_moonraker_stats(use_temp=True)
+        if args.preserve_timelapses:
+            installer.backup_timelapse_files(use_temp=True)
+        if args.preserve_gcodes:
+            installer.backup_gcode_files(use_temp=True)
         installer.reset_device()
         installer.log("Factory reset completed successfully.")
         installer.executor.close()
@@ -1225,6 +2199,29 @@ Examples:
         else:
             # Create new backup in temp (automated, single-session)
             installer.backup_moonraker_stats(use_temp=True)
+
+    if args.reset and args.preserve_timelapses:
+        if args.restore_backup:
+            # Load from existing backup
+            timelapse_dir = Path(args.restore_backup) / "timelapse"
+            if timelapse_dir.exists():
+                installer.timelapse_backup_dir = timelapse_dir
+                installer.timelapse_backup_files = list(timelapse_dir.glob("*"))
+        else:
+            # Create new backup in temp (automated, single-session)
+            installer.backup_timelapse_files(use_temp=True)
+
+    if args.reset and args.preserve_gcodes:
+        if args.restore_backup:
+            # Load from existing backup
+            gcodes_dir = Path(args.restore_backup) / "gcodes"
+            if gcodes_dir.exists():
+                installer.gcodes_backup_dir = gcodes_dir
+                installer.gcodes_backup_files = list(gcodes_dir.glob("*"))
+        else:
+            # Create new backup in temp (automated, single-session)
+            installer.backup_gcode_files(use_temp=True)
+
     if args.reset:
         installer.reset_device()
         installer.ensure_ssh_access()

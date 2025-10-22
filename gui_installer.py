@@ -20,6 +20,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -65,18 +66,26 @@ class PrinterInstallerGUI:
         # Get current working directory for file picker initial path
         self.current_dir = str(Path.cwd())
 
+        # Backup sizes cache
+        self.backup_sizes_cache: dict[str, dict] | None = None
+        self.CACHE_EXPIRY_SECONDS = 300  # 5 minutes
+
         # Refs
         self.ip_field = ft.Ref[ft.TextField]()
         self.branch_field = ft.Ref[ft.Dropdown]()
         self.reset_checkbox = ft.Ref[ft.Checkbox]()
         self.preserve_stats_checkbox = ft.Ref[ft.Checkbox]()
-        self.restore_backup_checkbox = ft.Ref[ft.Checkbox]()
+        self.preserve_timelapses_checkbox = ft.Ref[ft.Checkbox]()
+        self.preserve_gcodes_checkbox = ft.Ref[ft.Checkbox]()
+        self.preserve_stats_loading = ft.Ref[ft.ProgressRing]()
+        self.preserve_timelapses_loading = ft.Ref[ft.ProgressRing]()
+        self.preserve_gcodes_loading = ft.Ref[ft.ProgressRing]()
+        self.preserve_stats_size_text = ft.Ref[ft.Text]()
+        self.preserve_timelapses_size_text = ft.Ref[ft.Text]()
+        self.preserve_gcodes_size_text = ft.Ref[ft.Text]()
         self.bootstrap_checkbox = ft.Ref[ft.Checkbox]()
         self.k2_checkbox = ft.Ref[ft.Checkbox]()
         self.repo_checkbox = ft.Ref[ft.Checkbox]()
-        self.backup_path_field = ft.Ref[ft.TextField]()
-        self.backup_path_container = ft.Ref[ft.Container]()
-        self.browse_btn = ft.Ref[ft.FilledButton]()
         self.log_container = ft.Ref[ft.Container]()
         self.log_view = ft.Ref[ft.ListView]()
         self.toggle_log_btn = ft.Ref[ft.IconButton]()
@@ -87,15 +96,35 @@ class PrinterInstallerGUI:
         self.factory_reset_dialog = None
         self.backup_dialog = None
         self.backup_dialog_path_field = ft.Ref[ft.TextField]()
+        self.backup_dialog_moonraker_checkbox = ft.Ref[ft.Checkbox]()
+        self.backup_dialog_timelapses_checkbox = ft.Ref[ft.Checkbox]()
+        self.backup_dialog_gcodes_checkbox = ft.Ref[ft.Checkbox]()
+        self.backup_dialog_moonraker_size_text = ft.Ref[ft.Text]()
+        self.backup_dialog_timelapses_size_text = ft.Ref[ft.Text]()
+        self.backup_dialog_gcodes_size_text = ft.Ref[ft.Text]()
+        self.backup_dialog_moonraker_loading = ft.Ref[ft.ProgressRing]()
+        self.backup_dialog_timelapses_loading = ft.Ref[ft.ProgressRing]()
+        self.backup_dialog_gcodes_loading = ft.Ref[ft.ProgressRing]()
+        self.backup_dialog_timelapses_row = ft.Ref[ft.Row]()
+        self.backup_dialog_gcodes_row = ft.Ref[ft.Row]()
+        self.backup_dialog_start_btn = ft.Ref[ft.TextButton]()
+        self.restore_dialog = None
+        self.restore_dialog_moonraker_checkbox = ft.Ref[ft.Checkbox]()
+        self.restore_dialog_timelapses_checkbox = ft.Ref[ft.Checkbox]()
+        self.restore_dialog_gcodes_checkbox = ft.Ref[ft.Checkbox]()
+        self.restore_dialog_moonraker_size_text = ft.Ref[ft.Text]()
+        self.restore_dialog_timelapses_size_text = ft.Ref[ft.Text]()
+        self.restore_dialog_gcodes_size_text = ft.Ref[ft.Text]()
+        self.restore_dialog_checkboxes_container = ft.Ref[ft.Container]()
+        self.restore_dialog_start_btn = ft.Ref[ft.TextButton]()
+        self.restore_dialog_path_field = ft.Ref[ft.TextField]()
         self.create_factory_reset_dialog()
         self.create_backup_dialog()
 
         # File pickers
-        self.backup_path_picker = ft.FilePicker(on_result=self.on_backup_path_selected)
         self.backup_save_picker = ft.FilePicker(on_result=self.on_backup_save_selected)
         self.restore_picker = ft.FilePicker(on_result=self.on_restore_path_selected)
         self.log_save_picker = ft.FilePicker(on_result=self.on_log_save_selected)
-        self.page.overlay.append(self.backup_path_picker)
         self.page.overlay.append(self.backup_save_picker)
         self.page.overlay.append(self.restore_picker)
         self.page.overlay.append(self.log_save_picker)
@@ -104,6 +133,10 @@ class PrinterInstallerGUI:
 
         self.setup_ui()
         self.update_button_status("Start Installation", ft.Colors.BLUE, False)
+        
+        # Trigger macOS LAN permission prompt early by attempting local network access
+        threading.Thread(target=self.trigger_lan_permission_prompt, daemon=True).start()
+        
         threading.Thread(target=self.load_branch_options, daemon=True).start()
 
     def configure_multiprocessing(self) -> None:
@@ -131,13 +164,13 @@ class PrinterInstallerGUI:
                                 height=36,
                             ),
                             ft.ElevatedButton(
-                                "💾 Backup Moonraker Stats",
+                                "💾 Backup",
                                 on_click=lambda _: self.show_backup_dialog(),
                                 height=36,
                             ),
                             ft.ElevatedButton(
-                                "↩️ Restore Moonraker Stats",
-                                on_click=lambda _: self.quick_restore(),
+                                "↩️ Restore",
+                                on_click=lambda _: self.show_restore_dialog(),
                                 height=36,
                             ),
                             ft.ElevatedButton(
@@ -263,12 +296,33 @@ class PrinterInstallerGUI:
                                                 ),
                                                 ft.Container(
                                                     content=ft.Container(
-                                                        content=ft.Checkbox(
-                                                            ref=self.preserve_stats_checkbox,
-                                                            label="↳ Preserve Moonraker Stats",
-                                                            value=False,
-                                                            disabled=True,
-                                                            on_change=self.on_preserve_stats_toggled,
+                                                        content=ft.Row(
+                                                            [
+                                                                ft.Checkbox(
+                                                                    ref=self.preserve_stats_checkbox,
+                                                                    label="↳ Preserve Moonraker Stats",
+                                                                    value=False,
+                                                                    disabled=True,
+                                                                    label_style=ft.TextStyle(
+                                                                        color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                                                                    ),
+                                                                    on_change=self.on_preserve_stats_toggled,
+                                                                ),
+                                                                ft.ProgressRing(
+                                                                    ref=self.preserve_stats_loading,
+                                                                    width=16,
+                                                                    height=16,
+                                                                    stroke_width=2,
+                                                                    visible=False,
+                                                                ),
+                                                                ft.Text(
+                                                                    ref=self.preserve_stats_size_text,
+                                                                    size=11,
+                                                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                                                ),
+                                                            ],
+                                                            spacing=8,
+                                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                                         ),
                                                         padding=ft.padding.only(
                                                             left=28
@@ -277,38 +331,76 @@ class PrinterInstallerGUI:
                                                     height=40,
                                                 ),
                                                 ft.Container(
-                                                    content=ft.Checkbox(
-                                                        ref=self.restore_backup_checkbox,
-                                                        label="Use Existing Backup for Installation",
-                                                        value=False,
-                                                        on_change=self.on_restore_backup_toggled,
+                                                    content=ft.Container(
+                                                        content=ft.Row(
+                                                            [
+                                                                ft.Checkbox(
+                                                                    ref=self.preserve_timelapses_checkbox,
+                                                                    label="↳ Preserve Timelapses",
+                                                                    value=False,
+                                                                    disabled=True,
+                                                                    label_style=ft.TextStyle(
+                                                                        color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                                                                    ),
+                                                                    on_change=self.on_preserve_timelapses_toggled,
+                                                                ),
+                                                                ft.ProgressRing(
+                                                                    ref=self.preserve_timelapses_loading,
+                                                                    width=16,
+                                                                    height=16,
+                                                                    stroke_width=2,
+                                                                    visible=False,
+                                                                ),
+                                                                ft.Text(
+                                                                    ref=self.preserve_timelapses_size_text,
+                                                                    size=11,
+                                                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                                                ),
+                                                            ],
+                                                            spacing=8,
+                                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                                        ),
+                                                        padding=ft.padding.only(
+                                                            left=28
+                                                        ),
                                                     ),
                                                     height=40,
                                                 ),
                                                 ft.Container(
-                                                    ref=self.backup_path_container,
-                                                    visible=False,
-                                                    content=ft.Row(
-                                                        [
-                                                            ft.TextField(
-                                                                ref=self.backup_path_field,
-                                                                label="Backup Directory",
-                                                                hint_text="/path/to/backup",
-                                                                value="",
-                                                                dense=True,
-                                                                expand=1,
-                                                            ),
-                                                            ft.FilledButton(
-                                                                ref=self.browse_btn,
-                                                                text="Browse",
-                                                                on_click=self.on_browse_button_click,
-                                                                tooltip="Select backup directory",
-                                                                height=36,
-                                                            ),
-                                                        ],
-                                                        spacing=8,
+                                                    content=ft.Container(
+                                                        content=ft.Row(
+                                                            [
+                                                                ft.Checkbox(
+                                                                    ref=self.preserve_gcodes_checkbox,
+                                                                    label="↳ Preserve GCodes",
+                                                                    value=False,
+                                                                    disabled=True,
+                                                                    label_style=ft.TextStyle(
+                                                                        color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                                                                    ),
+                                                                    on_change=self.on_preserve_gcodes_toggled,
+                                                                ),
+                                                                ft.ProgressRing(
+                                                                    ref=self.preserve_gcodes_loading,
+                                                                    width=16,
+                                                                    height=16,
+                                                                    stroke_width=2,
+                                                                    visible=False,
+                                                                ),
+                                                                ft.Text(
+                                                                    ref=self.preserve_gcodes_size_text,
+                                                                    size=11,
+                                                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                                                ),
+                                                            ],
+                                                            spacing=8,
+                                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                                        ),
+                                                        padding=ft.padding.only(
+                                                            left=28
+                                                        ),
                                                     ),
-                                                    padding=ft.padding.only(left=28),
+                                                    height=40,
                                                 ),
                                             ],
                                             spacing=8,
@@ -447,6 +539,25 @@ class PrinterInstallerGUI:
         self.page.snack_bar.open = True
         self.page.update()
 
+    def trigger_lan_permission_prompt(self):
+        """Trigger macOS Local Network permission prompt on startup."""
+        import socket
+        
+        if sys.platform != "darwin":
+            return
+        
+        ip = self.ip_field.current.value.strip() if self.ip_field.current else ""
+        if not ip:
+            return
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect((ip, 22))
+            sock.close()
+        except (socket.timeout, socket.error, OSError):
+            pass
+
     def load_branch_options(self):
         """Fetch brancehs"""
         url = "https://api.github.com/repos/Jacob10383/Printer/branches"
@@ -488,61 +599,260 @@ class PrinterInstallerGUI:
         self.page.update()
 
     def on_reset_toggled(self, e):
-        """Toggle preserve stats checkbox and update backup restore state."""
-        self.preserve_stats_checkbox.current.disabled = (
-            not self.reset_checkbox.current.value
-        )
-        if not self.reset_checkbox.current.value:
+        """Toggle preserve stats and timelapses checkboxes."""
+        is_reset_enabled = self.reset_checkbox.current.value
+        
+        if not is_reset_enabled:
+            # Disable and clear checkboxes
+            self.preserve_stats_checkbox.current.disabled = True
+            self.preserve_timelapses_checkbox.current.disabled = True
             self.preserve_stats_checkbox.current.value = False
-        self.update_backup_restore_state()
-        self.page.update()
+            self.preserve_timelapses_checkbox.current.value = False
+            # Apply greyed-out label style when disabled
+            if self.preserve_stats_checkbox.current:
+                self.preserve_stats_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            if self.preserve_timelapses_checkbox.current:
+                self.preserve_timelapses_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            if self.preserve_gcodes_checkbox.current:
+                self.preserve_gcodes_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            # Hide any loading indicators
+            if self.preserve_stats_loading.current:
+                self.preserve_stats_loading.current.visible = False
+            if self.preserve_timelapses_loading.current:
+                self.preserve_timelapses_loading.current.visible = False
+            if self.preserve_gcodes_loading.current:
+                self.preserve_gcodes_loading.current.visible = False
+            # Clear size text
+            if self.preserve_stats_size_text.current:
+                self.preserve_stats_size_text.current.value = ""
+            if self.preserve_timelapses_size_text.current:
+                self.preserve_timelapses_size_text.current.value = ""
+            if self.preserve_gcodes_size_text.current:
+                self.preserve_gcodes_size_text.current.value = ""
+            self.page.update()
+            return
+        
+        # Factory reset is being enabled - check cache
+        ip = self.ip_field.current.value.strip() if self.ip_field.current else ""
+        
+        if not ip:
+            # No IP - just enable all checkboxes
+            self.preserve_stats_checkbox.current.disabled = False
+            self.preserve_timelapses_checkbox.current.disabled = False
+            self.preserve_gcodes_checkbox.current.disabled = False
+            self.page.update()
+            return
+        
+        # Check cache synchronously
+        cache_valid = False
+        if self.backup_sizes_cache is not None:
+            cache = self.backup_sizes_cache
+            cache_ip = cache.get("ip")
+            cache_timestamp = cache.get("timestamp", 0)
+            current_time = time.time()
+            time_diff = current_time - cache_timestamp
+            
+            print(f"[MAIN_MENU_CACHE] Checking cache for IP: {ip}")
+            print(f"[MAIN_MENU_CACHE] Cache IP: {cache_ip}, Time diff: {time_diff}s")
+            
+            if cache_ip == ip and time_diff < self.CACHE_EXPIRY_SECONDS:
+                cache_valid = True
+                print(f"[MAIN_MENU_CACHE] Cache VALID - using cached data")
+                sizes = cache.get("sizes", {})
+                self._update_main_menu_with_sizes(sizes)
+            else:
+                print(f"[MAIN_MENU_CACHE] Cache INVALID - will query")
+        else:
+            print(f"[MAIN_MENU_CACHE] No cache exists")
+        
+        if not cache_valid:
+            # Cache invalid - enable all checkboxes and show loading
+            self.preserve_stats_checkbox.current.disabled = False
+            self.preserve_timelapses_checkbox.current.disabled = False
+            self.preserve_gcodes_checkbox.current.disabled = False
+            
+            # Show loading indicators
+            if self.preserve_stats_loading.current:
+                self.preserve_stats_loading.current.visible = True
+            if self.preserve_timelapses_loading.current:
+                self.preserve_timelapses_loading.current.visible = True
+            if self.preserve_gcodes_loading.current:
+                self.preserve_gcodes_loading.current.visible = True
+            
+            self.page.update()
+            
+            # Start background query
+            print(f"[MAIN_MENU_CACHE] Starting background query thread")
+            threading.Thread(target=self.query_sizes_for_main_menu, daemon=True).start()
+        else:
+            # Cache valid - checkboxes already updated
+            self.page.update()
 
     def on_preserve_stats_toggled(self, e):
-        """Update backup restore state when preserve stats is toggled."""
-        self.update_backup_restore_state()
+        """Handle preserve stats toggle."""
         self.page.update()
 
-    def update_backup_restore_state(self):
-        """Disable restore backup checkbox if preserve stats is enabled."""
-        preserve_enabled = (
-            self.preserve_stats_checkbox.current.value
-            and not self.preserve_stats_checkbox.current.disabled
-        )
-
-        if preserve_enabled:
-            # Disable and uncheck restore backup
-            self.restore_backup_checkbox.current.disabled = True
-            self.restore_backup_checkbox.current.value = False
-            if self.backup_path_container.current:
-                self.backup_path_container.current.visible = False
-        else:
-            # Enable restore backup
-            self.restore_backup_checkbox.current.disabled = False
-
-    def on_restore_backup_toggled(self, e):
-        """Show or hide backup path input based on toggle."""
-        use_backup = self.restore_backup_checkbox.current.value
-        if self.backup_path_container.current:
-            self.backup_path_container.current.visible = use_backup
-        if not use_backup and self.backup_path_field.current:
-            self.backup_path_field.current.value = ""
+    def on_preserve_timelapses_toggled(self, e):
+        """Handle preserve timelapses toggle."""
         self.page.update()
 
-    def on_backup_path_selected(self, e: ft.FilePickerResultEvent):
-        """Handle backup path folder selection."""
-        if e.path:
-            self.backup_path_field.current.value = e.path
-            # Auto-enable the checkbox when a path is selected
-            self.restore_backup_checkbox.current.value = True
-            if self.backup_path_container.current:
-                self.backup_path_container.current.visible = True
-            self.page.update()
-            self.show_snackbar(f"Selected: {e.path}", ft.Colors.GREEN)
+    def on_preserve_gcodes_toggled(self, e):
+        """Handle preserve gcodes toggle."""
+        self.page.update()
+
+    def _update_main_menu_with_sizes(self, sizes: dict[str, dict]):
+        """Update main menu checkbox states based on size data."""
+        moonraker_info = sizes.get("moonraker", {})
+        timelapses_info = sizes.get("timelapses", {})
+        gcodes_info = sizes.get("gcodes", {})
+        
+        moonraker_exists = moonraker_info.get("exists", True)  # Default to True (optimistic)
+        timelapses_exist = timelapses_info.get("exists", True)  # Default to True (optimistic)
+        gcodes_exist = gcodes_info.get("exists", True)  # Default to True (optimistic)
+        
+        print(f"[MAIN_MENU_CACHE] Updating UI - moonraker exists: {moonraker_exists}, timelapses exist: {timelapses_exist}, gcodes exist: {gcodes_exist}")
+        
+        # Update Moonraker checkbox and size display
+        if self.preserve_stats_checkbox.current:
+            self.preserve_stats_checkbox.current.disabled = not moonraker_exists
+            if not moonraker_exists:
+                self.preserve_stats_checkbox.current.value = False
+                # Make label text more greyed out when disabled
+                self.preserve_stats_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            else:
+                # Reset to default label color when enabled
+                self.preserve_stats_checkbox.current.label_style = None
+        
+        if self.preserve_stats_size_text.current:
+            if moonraker_exists:
+                count = moonraker_info.get("count", 0)
+                size_kb = moonraker_info.get("size_kb", 0)
+                size_str = self.format_size(size_kb)
+                self.preserve_stats_size_text.current.value = f"({count} file{'s' if count != 1 else ''}, {size_str})"
+            else:
+                self.preserve_stats_size_text.current.value = "(None detected)"
+        
+        # Update Timelapses checkbox and size display
+        if self.preserve_timelapses_checkbox.current:
+            self.preserve_timelapses_checkbox.current.disabled = not timelapses_exist
+            if not timelapses_exist:
+                self.preserve_timelapses_checkbox.current.value = False
+                # Make label text more greyed out when disabled
+                self.preserve_timelapses_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            else:
+                # Reset to default label color when enabled
+                self.preserve_timelapses_checkbox.current.label_style = None
+        
+        if self.preserve_timelapses_size_text.current:
+            if timelapses_exist:
+                count = timelapses_info.get("count", 0)
+                size_kb = timelapses_info.get("size_kb", 0)
+                size_str = self.format_size(size_kb)
+                self.preserve_timelapses_size_text.current.value = f"({count} file{'s' if count != 1 else ''}, {size_str})"
+            else:
+                self.preserve_timelapses_size_text.current.value = "(None detected)"
+        
+        # Update GCodes checkbox and size display
+        if self.preserve_gcodes_checkbox.current:
+            self.preserve_gcodes_checkbox.current.disabled = not gcodes_exist
+            if not gcodes_exist:
+                self.preserve_gcodes_checkbox.current.value = False
+                # Make label text more greyed out when disabled
+                self.preserve_gcodes_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+            else:
+                # Reset to default label color when enabled
+                self.preserve_gcodes_checkbox.current.label_style = None
+        
+        if self.preserve_gcodes_size_text.current:
+            if gcodes_exist:
+                count = gcodes_info.get("count", 0)
+                size_kb = gcodes_info.get("size_kb", 0)
+                size_str = self.format_size(size_kb)
+                self.preserve_gcodes_size_text.current.value = f"({count} file{'s' if count != 1 else ''}, {size_str})"
+            else:
+                self.preserve_gcodes_size_text.current.value = "(None detected)"
+        
+        # Hide loading indicators
+        if self.preserve_stats_loading.current:
+            self.preserve_stats_loading.current.visible = False
+        if self.preserve_timelapses_loading.current:
+            self.preserve_timelapses_loading.current.visible = False
+        if self.preserve_gcodes_loading.current:
+            self.preserve_gcodes_loading.current.visible = False
+
+    def query_sizes_for_main_menu(self):
+        """Query backup sizes for main menu checkboxes (background thread)."""
+        ip = self.ip_field.current.value.strip() if self.ip_field.current else ""
+        if not ip:
+            return
+        
+        print(f"[MAIN_MENU_CACHE] Background query starting for IP: {ip}")
+        
+        # Reuse the existing query logic
+        try:
+            from fullinstaller import PrinterInstaller, SSHConnectionError
+            import logging
+            
+            temp_installer = PrinterInstaller(
+                printer_ip=ip,
+                branch="main",
+                password="creality_2024",
+            )
+            temp_installer.logger.setLevel(logging.CRITICAL)
+            temp_installer.logger.handlers.clear()
+            
+            sizes = temp_installer.query_backup_sizes()
+            temp_installer.executor.close()
+            
+            print(f"[MAIN_MENU_CACHE] Query completed successfully")
+            
+            # Update cache
+            self.backup_sizes_cache = {
+                "ip": ip,
+                "timestamp": time.time(),
+                "sizes": sizes,
+            }
+            
+            # Update UI
+            self._update_main_menu_with_sizes(sizes)
+            
+        except Exception as exc:
+            print(f"[MAIN_MENU_CACHE] Query failed: {type(exc).__name__}: {exc}")
+            # On failure, just enable all checkboxes (optimistic)
+            if self.preserve_stats_checkbox.current:
+                self.preserve_stats_checkbox.current.disabled = False
+            if self.preserve_timelapses_checkbox.current:
+                self.preserve_timelapses_checkbox.current.disabled = False
+            if self.preserve_gcodes_checkbox.current:
+                self.preserve_gcodes_checkbox.current.disabled = False
+        
+        # Hide loading indicators
+        if self.preserve_stats_loading.current:
+            self.preserve_stats_loading.current.visible = False
+        if self.preserve_timelapses_loading.current:
+            self.preserve_timelapses_loading.current.visible = False
+        if self.preserve_gcodes_loading.current:
+            self.preserve_gcodes_loading.current.visible = False
+        
+        self.page.update()
 
     def on_restore_path_selected(self, e: ft.FilePickerResultEvent):
-        """Handle restore directory selection."""
+        """Handle restore directory selection from picker."""
         if e.path:
-            self.run_command("restore", backup_dir=e.path)
+            self.restore_dialog_path_field.current.value = e.path
+            self.on_restore_path_changed(None)  # Trigger validation
 
     def on_step_checkbox_changed(self, key: str):
         """Ensure at least one install step stays enabled."""
@@ -743,13 +1053,13 @@ class PrinterInstallerGUI:
         self.run_command("reset_only", with_backup=with_backup)
 
     def create_backup_dialog(self):
-        """Create backup location selection dialog."""
+        """Create backup dialog with component selection."""
         if self.backup_dialog:
             return
 
         dialog_content = ft.Column(
             [
-                ft.Text("Select where to save the Moonraker stats backup."),
+                ft.Text("Select what to backup and where to save it."),
                 ft.Row(
                     [
                         ft.TextField(
@@ -768,6 +1078,82 @@ class PrinterInstallerGUI:
                     ],
                     spacing=8,
                 ),
+                ft.Divider(),
+                ft.Text("Components to backup:", size=13, weight=ft.FontWeight.W_500),
+                ft.Row(
+                    [
+                        ft.Checkbox(
+                            ref=self.backup_dialog_moonraker_checkbox,
+                            label="Moonraker Stats",
+                            value=True,
+                            on_change=self.on_backup_component_changed,
+                        ),
+                        ft.ProgressRing(
+                            ref=self.backup_dialog_moonraker_loading,
+                            width=16,
+                            height=16,
+                            stroke_width=2,
+                            visible=False,
+                        ),
+                        ft.Text(
+                            ref=self.backup_dialog_moonraker_size_text,
+                            size=11,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Checkbox(
+                            ref=self.backup_dialog_timelapses_checkbox,
+                            label="Timelapses",
+                            value=True,
+                            on_change=self.on_backup_component_changed,
+                        ),
+                        ft.ProgressRing(
+                            ref=self.backup_dialog_timelapses_loading,
+                            width=16,
+                            height=16,
+                            stroke_width=2,
+                            visible=False,
+                        ),
+                        ft.Text(
+                            ref=self.backup_dialog_timelapses_size_text,
+                            size=11,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
+                    ],
+                    ref=self.backup_dialog_timelapses_row,
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Checkbox(
+                            ref=self.backup_dialog_gcodes_checkbox,
+                            label="GCodes",
+                            value=True,
+                            on_change=self.on_backup_component_changed,
+                        ),
+                        ft.ProgressRing(
+                            ref=self.backup_dialog_gcodes_loading,
+                            width=16,
+                            height=16,
+                            stroke_width=2,
+                            visible=False,
+                        ),
+                        ft.Text(
+                            ref=self.backup_dialog_gcodes_size_text,
+                            size=11,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
+                    ],
+                    ref=self.backup_dialog_gcodes_row,
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ],
             spacing=12,
             tight=True,
@@ -777,7 +1163,7 @@ class PrinterInstallerGUI:
             modal=False,
             content_padding=ft.padding.symmetric(horizontal=16, vertical=12),
             actions_alignment=ft.MainAxisAlignment.END,
-            title=ft.Text("Backup Moonraker Stats"),
+            title=ft.Text("Backup"),
             content=dialog_content,
             actions=[
                 ft.TextButton(
@@ -785,7 +1171,8 @@ class PrinterInstallerGUI:
                     on_click=self.dismiss_backup_dialog,
                 ),
                 ft.TextButton(
-                    "Start Backup",
+                    ref=self.backup_dialog_start_btn,
+                    text="Start Backup",
                     on_click=self.handle_backup_dialog_confirm,
                 ),
             ],
@@ -793,15 +1180,302 @@ class PrinterInstallerGUI:
         )
         self.page.overlay.append(self.backup_dialog)
 
+    def format_size(self, size_kb: int) -> str:
+        """Convert kilobytes to human-readable format."""
+        if size_kb == 0:
+            return "0 MB"
+        elif size_kb < 1024:
+            return f"{size_kb} KB"
+        elif size_kb < 1024 * 1024:
+            mb = size_kb / 1024
+            return f"{mb:.1f} MB" if mb < 10 else f"{mb:.0f} MB"
+        else:
+            gb = size_kb / (1024 * 1024)
+            return f"{gb:.2f} GB" if gb < 10 else f"{gb:.1f} GB"
+
+    def _update_ui_with_sizes(self, sizes: dict[str, dict[str, int | bool]], query_successful: bool = False):
+        """Update UI with size information.
+        
+        Args:
+            sizes: Size information dict
+            query_successful: If True, disable checkboxes and show "None detected" if components don't exist
+        """
+        moonraker_info = sizes.get("moonraker", {})
+        timelapses_info = sizes.get("timelapses", {})
+        gcodes_info = sizes.get("gcodes", {})
+        
+        # Update Moonraker display
+        moonraker_exists = moonraker_info.get("exists", False)
+        if moonraker_exists:
+            count = moonraker_info.get("count", 0)
+            size_kb = moonraker_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.backup_dialog_moonraker_size_text.current:
+                self.backup_dialog_moonraker_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if moonraker exists
+            if self.backup_dialog_moonraker_checkbox.current:
+                self.backup_dialog_moonraker_checkbox.current.disabled = False
+                self.backup_dialog_moonraker_checkbox.current.label_style = None
+        else:
+            # Show "None detected" if query was successful and confirmed no moonraker exists
+            if query_successful and self.backup_dialog_moonraker_size_text.current:
+                self.backup_dialog_moonraker_size_text.current.value = "None detected"
+            elif not query_successful and self.backup_dialog_moonraker_size_text.current:
+                self.backup_dialog_moonraker_size_text.current.value = ""
+            # Disable checkbox if moonraker doesn't exist (but only if query was successful)
+            if query_successful and self.backup_dialog_moonraker_checkbox.current:
+                self.backup_dialog_moonraker_checkbox.current.disabled = True
+                self.backup_dialog_moonraker_checkbox.current.value = False
+                self.backup_dialog_moonraker_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        
+        # Update Timelapses display
+        timelapses_exist = timelapses_info.get("exists", False)
+        if timelapses_exist:
+            count = timelapses_info.get("count", 0)
+            size_kb = timelapses_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.backup_dialog_timelapses_size_text.current:
+                self.backup_dialog_timelapses_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if timelapses exist
+            if self.backup_dialog_timelapses_checkbox.current:
+                self.backup_dialog_timelapses_checkbox.current.disabled = False
+                self.backup_dialog_timelapses_checkbox.current.label_style = None
+        else:
+            # Show "None detected" if query was successful and confirmed no timelapses exist
+            if query_successful and self.backup_dialog_timelapses_size_text.current:
+                self.backup_dialog_timelapses_size_text.current.value = "None detected"
+            elif not query_successful and self.backup_dialog_timelapses_size_text.current:
+                self.backup_dialog_timelapses_size_text.current.value = ""
+            # Disable checkbox if timelapses don't exist (but only if query was successful)
+            if query_successful and self.backup_dialog_timelapses_checkbox.current:
+                self.backup_dialog_timelapses_checkbox.current.disabled = True
+                self.backup_dialog_timelapses_checkbox.current.value = False
+                self.backup_dialog_timelapses_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        
+        # Update GCodes display
+        gcodes_exist = gcodes_info.get("exists", False)
+        if gcodes_exist:
+            count = gcodes_info.get("count", 0)
+            size_kb = gcodes_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.backup_dialog_gcodes_size_text.current:
+                self.backup_dialog_gcodes_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if gcodes exist
+            if self.backup_dialog_gcodes_checkbox.current:
+                self.backup_dialog_gcodes_checkbox.current.disabled = False
+                self.backup_dialog_gcodes_checkbox.current.label_style = None
+        else:
+            # Show "None detected" if query was successful and confirmed no gcodes exist
+            if query_successful and self.backup_dialog_gcodes_size_text.current:
+                self.backup_dialog_gcodes_size_text.current.value = "None detected"
+            elif not query_successful and self.backup_dialog_gcodes_size_text.current:
+                self.backup_dialog_gcodes_size_text.current.value = ""
+            # Disable checkbox if gcodes don't exist (but only if query was successful)
+            if query_successful and self.backup_dialog_gcodes_checkbox.current:
+                self.backup_dialog_gcodes_checkbox.current.disabled = True
+                self.backup_dialog_gcodes_checkbox.current.value = False
+                self.backup_dialog_gcodes_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+
+    def query_backup_sizes_async(self):
+        """Query backup sizes in background thread."""
+        ip = self.ip_field.current.value.strip() if self.ip_field.current else ""
+        if not ip:
+            return
+        
+        # Check cache first
+        if self.backup_sizes_cache is not None:
+            cache = self.backup_sizes_cache
+            cache_ip = cache.get("ip")
+            cache_timestamp = cache.get("timestamp", 0)
+            current_time = time.time()
+            time_diff = current_time - cache_timestamp
+            
+            # Debug logging
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Thread checking cache for IP: {ip}")
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Cache IP: {cache_ip}, Cache timestamp: {cache_timestamp}")
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Current time: {current_time}, Time diff: {time_diff}s, Expiry: {self.CACHE_EXPIRY_SECONDS}s")
+            
+            # Check if IP matches and cache hasn't expired
+            if cache_ip == ip and time_diff < self.CACHE_EXPIRY_SECONDS:
+                print(f"[BACKUP_CACHE_DEBUG_THREAD] Cache VALID in thread - using cached data")
+                # Use cached data - ensure loading indicators are hidden
+                if self.backup_dialog_moonraker_loading.current:
+                    self.backup_dialog_moonraker_loading.current.visible = False
+                if self.backup_dialog_timelapses_loading.current:
+                    self.backup_dialog_timelapses_loading.current.visible = False
+                if self.backup_dialog_gcodes_loading.current:
+                    self.backup_dialog_gcodes_loading.current.visible = False
+                
+                # Cache is validated, so we can trust it - hide timelapse if it doesn't exist
+                sizes = cache.get("sizes", {})
+                self._update_ui_with_sizes(sizes, query_successful=True)
+                self.page.update()
+                return
+            else:
+                print(f"[BACKUP_CACHE_DEBUG_THREAD] Cache INVALID in thread - IP match: {cache_ip == ip}, Expired: {time_diff >= self.CACHE_EXPIRY_SECONDS}")
+        
+        # Cache miss or invalid - query from printer
+        # Show loading indicators
+        if self.backup_dialog_moonraker_loading.current:
+            self.backup_dialog_moonraker_loading.current.visible = True
+        if self.backup_dialog_timelapses_loading.current:
+            self.backup_dialog_timelapses_loading.current.visible = True
+        if self.backup_dialog_gcodes_loading.current:
+            self.backup_dialog_gcodes_loading.current.visible = True
+        self.page.update()
+        
+        try:
+            # Import here to avoid circular imports
+            from fullinstaller import PrinterInstaller, SSHConnectionError
+            import logging
+            
+            # Create installer instance with silent logger
+            temp_installer = PrinterInstaller(
+                printer_ip=ip,
+                branch="main",
+                password="creality_2024",
+            )
+            temp_installer.logger.setLevel(logging.CRITICAL)
+            temp_installer.logger.handlers.clear()
+            
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Starting query for IP: {ip}")
+            sizes = temp_installer.query_backup_sizes()
+            temp_installer.executor.close()
+            
+            # Check if we got any actual data (not just empty defaults)
+            moonraker_info = sizes.get("moonraker", {})
+            timelapses_info = sizes.get("timelapses", {})
+            has_data = moonraker_info.get("exists", False) or timelapses_info.get("exists", False)
+            
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Query completed - moonraker exists: {moonraker_info.get('exists')}, timelapses exists: {timelapses_info.get('exists')}")
+            
+            # Only cache if query succeeded AND we got valid data or successfully connected
+            # (empty data is valid if connection succeeded - means no files exist)
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Caching results")
+            self.backup_sizes_cache = {
+                "ip": ip,
+                "timestamp": time.time(),
+                "sizes": sizes,
+            }
+            
+            # Update UI with results (query was successful, so hide timelapse if it doesn't exist)
+            self._update_ui_with_sizes(sizes, query_successful=True)
+            
+            # Hide loading indicators
+            if self.backup_dialog_moonraker_loading.current:
+                self.backup_dialog_moonraker_loading.current.visible = False
+            if self.backup_dialog_timelapses_loading.current:
+                self.backup_dialog_timelapses_loading.current.visible = False
+            if self.backup_dialog_gcodes_loading.current:
+                self.backup_dialog_gcodes_loading.current.visible = False
+                
+        except SSHConnectionError as exc:
+            # SSH connection failed - don't cache anything, preserve existing cache if any
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] SSH Connection FAILED: {exc}")
+            # Just hide loading indicators
+            if self.backup_dialog_moonraker_loading.current:
+                self.backup_dialog_moonraker_loading.current.visible = False
+            if self.backup_dialog_timelapses_loading.current:
+                self.backup_dialog_timelapses_loading.current.visible = False
+            if self.backup_dialog_gcodes_loading.current:
+                self.backup_dialog_gcodes_loading.current.visible = False
+            # Don't update cache - preserve existing cache for this IP if it exists
+        except Exception as exc:
+            # Other query failures - don't cache anything, preserve existing cache if any
+            print(f"[BACKUP_CACHE_DEBUG_THREAD] Query FAILED: {type(exc).__name__}: {exc}")
+            # Just hide loading indicators
+            if self.backup_dialog_moonraker_loading.current:
+                self.backup_dialog_moonraker_loading.current.visible = False
+            if self.backup_dialog_timelapses_loading.current:
+                self.backup_dialog_timelapses_loading.current.visible = False
+            if self.backup_dialog_gcodes_loading.current:
+                self.backup_dialog_gcodes_loading.current.visible = False
+            # Don't update cache - preserve existing cache for this IP if it exists
+        
+        self.page.update()
+
     def show_backup_dialog(self, e=None):
         """Show backup location selection dialog."""
         self.create_backup_dialog()
         if self.backup_dialog:
-            # Clear previous path
+            # Clear previous path and size info
             if self.backup_dialog_path_field.current:
                 self.backup_dialog_path_field.current.value = ""
+            if self.backup_dialog_moonraker_size_text.current:
+                self.backup_dialog_moonraker_size_text.current.value = ""
+            if self.backup_dialog_timelapses_size_text.current:
+                self.backup_dialog_timelapses_size_text.current.value = ""
+            if self.backup_dialog_gcodes_size_text.current:
+                self.backup_dialog_gcodes_size_text.current.value = ""
+            
+            # Ensure loading indicators are hidden initially
+            if self.backup_dialog_moonraker_loading.current:
+                self.backup_dialog_moonraker_loading.current.visible = False
+            if self.backup_dialog_timelapses_loading.current:
+                self.backup_dialog_timelapses_loading.current.visible = False
+            if self.backup_dialog_gcodes_loading.current:
+                self.backup_dialog_gcodes_loading.current.visible = False
+            
+            # Ensure all rows are visible initially (checkboxes will be disabled if components don't exist)
+            if self.backup_dialog_timelapses_row.current:
+                self.backup_dialog_timelapses_row.current.visible = True
+            if self.backup_dialog_gcodes_row.current:
+                self.backup_dialog_gcodes_row.current.visible = True
+            
+            # Reset checkboxes to enabled state initially (will be disabled if query confirms no components exist)
+            if self.backup_dialog_moonraker_checkbox.current:
+                self.backup_dialog_moonraker_checkbox.current.disabled = False
+                self.backup_dialog_moonraker_checkbox.current.value = True
+            if self.backup_dialog_timelapses_checkbox.current:
+                self.backup_dialog_timelapses_checkbox.current.disabled = False
+                self.backup_dialog_timelapses_checkbox.current.value = True
+            if self.backup_dialog_gcodes_checkbox.current:
+                self.backup_dialog_gcodes_checkbox.current.disabled = False
+                self.backup_dialog_gcodes_checkbox.current.value = True
+            
             self.backup_dialog.open = True
+            
+            # Check cache synchronously before starting background thread
+            ip = self.ip_field.current.value.strip() if self.ip_field.current else ""
+            cache_valid = False
+            if ip and self.backup_sizes_cache is not None:
+                cache = self.backup_sizes_cache
+                cache_ip = cache.get("ip")
+                cache_timestamp = cache.get("timestamp", 0)
+                current_time = time.time()
+                time_diff = current_time - cache_timestamp
+                
+                # Debug logging
+                print(f"[BACKUP_CACHE_DEBUG] Checking cache for IP: {ip}")
+                print(f"[BACKUP_CACHE_DEBUG] Cache IP: {cache_ip}, Cache timestamp: {cache_timestamp}")
+                print(f"[BACKUP_CACHE_DEBUG] Current time: {current_time}, Time diff: {time_diff}s, Expiry: {self.CACHE_EXPIRY_SECONDS}s")
+                
+                # Check if IP matches and cache hasn't expired
+                if cache_ip == ip and time_diff < self.CACHE_EXPIRY_SECONDS:
+                    cache_valid = True
+                    print(f"[BACKUP_CACHE_DEBUG] Cache VALID - using cached data")
+                    # Use cached data immediately - cache is validated, so we can trust it
+                    sizes = cache.get("sizes", {})
+                    self._update_ui_with_sizes(sizes, query_successful=True)
+                else:
+                    print(f"[BACKUP_CACHE_DEBUG] Cache INVALID - IP match: {cache_ip == ip}, Expired: {time_diff >= self.CACHE_EXPIRY_SECONDS}")
+            else:
+                print(f"[BACKUP_CACHE_DEBUG] No cache or no IP - cache exists: {self.backup_sizes_cache is not None}, IP: {ip}")
+            
             self.page.update()
+            
+            # Only start background query if cache is not valid
+            if not cache_valid and ip:
+                print(f"[BACKUP_CACHE_DEBUG] Starting background query thread")
+                threading.Thread(target=self.query_backup_sizes_async, daemon=True).start()
+            else:
+                print(f"[BACKUP_CACHE_DEBUG] Skipping background query - cache_valid: {cache_valid}, ip: {ip}")
 
     def dismiss_backup_dialog(self, e=None):
         """Close backup dialog without action."""
@@ -815,8 +1489,36 @@ class PrinterInstallerGUI:
             dialog_title="Select Backup Directory", initial_directory=self.current_dir
         )
 
+    def on_backup_component_changed(self, e):
+        """Update Start Backup button state based on checkbox selection."""
+        # Only check enabled checkboxes
+        moonraker_checked = (
+            self.backup_dialog_moonraker_checkbox.current.value
+            if (self.backup_dialog_moonraker_checkbox.current and 
+                not self.backup_dialog_moonraker_checkbox.current.disabled)
+            else False
+        )
+        timelapses_checked = (
+            self.backup_dialog_timelapses_checkbox.current.value
+            if (self.backup_dialog_timelapses_checkbox.current and 
+                not self.backup_dialog_timelapses_checkbox.current.disabled)
+            else False
+        )
+        gcodes_checked = (
+            self.backup_dialog_gcodes_checkbox.current.value
+            if (self.backup_dialog_gcodes_checkbox.current and 
+                not self.backup_dialog_gcodes_checkbox.current.disabled)
+            else False
+        )
+        
+        # Disable button if nothing is selected
+        if self.backup_dialog_start_btn.current:
+            self.backup_dialog_start_btn.current.disabled = not (moonraker_checked or timelapses_checked or gcodes_checked)
+            self.page.update()
+
     def handle_backup_dialog_confirm(self, e):
-        """Execute backup with selected directory."""
+        """Execute backup with selected components."""
+        # Validate that backup path is not empty
         backup_path = (
             self.backup_dialog_path_field.current.value.strip()
             if self.backup_dialog_path_field.current
@@ -825,9 +1527,497 @@ class PrinterInstallerGUI:
         if not backup_path:
             self.show_snackbar("Please select a backup directory", ft.Colors.ORANGE)
             return
-
+        
+        # Get checkbox states for enabled checkboxes only
+        moonraker_checked = (
+            self.backup_dialog_moonraker_checkbox.current.value
+            if (self.backup_dialog_moonraker_checkbox.current and 
+                not self.backup_dialog_moonraker_checkbox.current.disabled)
+            else False
+        )
+        timelapses_checked = (
+            self.backup_dialog_timelapses_checkbox.current.value
+            if (self.backup_dialog_timelapses_checkbox.current and 
+                not self.backup_dialog_timelapses_checkbox.current.disabled)
+            else False
+        )
+        gcodes_checked = (
+            self.backup_dialog_gcodes_checkbox.current.value
+            if (self.backup_dialog_gcodes_checkbox.current and 
+                not self.backup_dialog_gcodes_checkbox.current.disabled)
+            else False
+        )
+        
+        # Validate that at least one component is selected
+        if not moonraker_checked and not timelapses_checked and not gcodes_checked:
+            self.show_snackbar("Please select at least one component to backup", ft.Colors.ORANGE)
+            return
+        
+        # Dismiss dialog after validation passes
         self.dismiss_backup_dialog()
-        self.run_command("backup", backup_dir=backup_path)
+        
+        # Call run_command with action "backup" and pass component flags
+        self.run_command(
+            "backup",
+            backup_dir=backup_path,
+            backup_moonraker=moonraker_checked,
+            backup_timelapses=timelapses_checked,
+            backup_gcodes=gcodes_checked,
+        )
+
+    def create_restore_dialog(self):
+        """Create restore dialog with validation and component selection."""
+        if self.restore_dialog:
+            return
+
+        dialog_content = ft.Column(
+            [
+                ft.Text("Select a backup directory to restore from."),
+                ft.Row(
+                    [
+                        ft.TextField(
+                            ref=self.restore_dialog_path_field,
+                            label="Backup Directory",
+                            hint_text="/path/to/backup",
+                            value="",
+                            dense=True,
+                            expand=1,
+                            on_change=self.on_restore_path_changed,
+                        ),
+                        ft.FilledButton(
+                            text="Browse",
+                            on_click=self.on_restore_dialog_browse_click,
+                            height=36,
+                        ),
+                    ],
+                    spacing=8,
+                ),
+                ft.Container(
+                    ref=self.restore_dialog_checkboxes_container,
+                    visible=False,
+                    content=ft.Column(
+                        [
+                            ft.Divider(),
+                            ft.Text("Components to restore:", size=13, weight=ft.FontWeight.W_500),
+                            ft.Row(
+                                [
+                                    ft.Checkbox(
+                                        ref=self.restore_dialog_moonraker_checkbox,
+                                        label="Moonraker Stats",
+                                        value=False,
+                                        visible=False,
+                                        on_change=self.on_restore_component_changed,
+                                    ),
+                                    ft.Text(
+                                        ref=self.restore_dialog_moonraker_size_text,
+                                        size=11,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.Checkbox(
+                                        ref=self.restore_dialog_timelapses_checkbox,
+                                        label="Timelapses",
+                                        value=False,
+                                        visible=False,
+                                        on_change=self.on_restore_component_changed,
+                                    ),
+                                    ft.Text(
+                                        ref=self.restore_dialog_timelapses_size_text,
+                                        size=11,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.Checkbox(
+                                        ref=self.restore_dialog_gcodes_checkbox,
+                                        label="GCodes",
+                                        value=False,
+                                        visible=False,
+                                        on_change=self.on_restore_component_changed,
+                                    ),
+                                    ft.Text(
+                                        ref=self.restore_dialog_gcodes_size_text,
+                                        size=11,
+                                        color=ft.Colors.ON_SURFACE_VARIANT,
+                                    ),
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ],
+                        spacing=8,
+                    ),
+                ),
+            ],
+            spacing=12,
+            tight=True,
+        )
+
+        self.restore_dialog = ft.AlertDialog(
+            modal=False,
+            content_padding=ft.padding.symmetric(horizontal=16, vertical=12),
+            actions_alignment=ft.MainAxisAlignment.END,
+            title=ft.Text("Restore"),
+            content=dialog_content,
+            actions=[
+                ft.TextButton(
+                    "Cancel",
+                    on_click=self.dismiss_restore_dialog,
+                ),
+                ft.TextButton(
+                    ref=self.restore_dialog_start_btn,
+                    text="Start Restore",
+                    on_click=self.handle_restore_dialog_confirm,
+                    disabled=True,  # Initially disabled until path is validated
+                ),
+            ],
+            on_dismiss=self.dismiss_restore_dialog,
+        )
+        self.page.overlay.append(self.restore_dialog)
+
+    def show_restore_dialog(self, e=None):
+        """Show restore dialog."""
+        self.create_restore_dialog()
+        if self.restore_dialog:
+            # Reset state
+            if self.restore_dialog_path_field.current:
+                self.restore_dialog_path_field.current.value = ""
+            self.restore_dialog_checkboxes_container.current.visible = False
+            self.restore_dialog_start_btn.current.disabled = True
+            self.restore_dialog.open = True
+            self.page.update()
+
+    def dismiss_restore_dialog(self, e=None):
+        """Close restore dialog."""
+        if self.restore_dialog:
+            self.restore_dialog.open = False
+            self.page.update()
+
+    def on_restore_dialog_browse_click(self, e):
+        """Open directory picker for restore dialog."""
+        self.restore_picker.get_directory_path(
+            dialog_title="Select Backup Directory",
+            initial_directory=self.current_dir
+        )
+
+    def _query_local_backup_sizes(self, backup_dir: Path) -> dict[str, dict[str, int | bool]]:
+        """Query backup sizes from local directory. Returns dict with moonraker, timelapses, and gcodes info."""
+        result = {
+            "moonraker": {"count": 0, "size_kb": 0, "exists": False},
+            "timelapses": {"count": 0, "size_kb": 0, "exists": False},
+            "gcodes": {"count": 0, "size_kb": 0, "exists": False},
+        }
+        
+        # Check Moonraker database files
+        moonraker_files = []
+        for filename in ["data.mdb", "moonraker-sql.db"]:
+            file_path = backup_dir / filename
+            if file_path.exists():
+                moonraker_files.append(file_path)
+        
+        if moonraker_files:
+            result["moonraker"]["exists"] = True
+            result["moonraker"]["count"] = len(moonraker_files)
+            total_size = sum(f.stat().st_size for f in moonraker_files)
+            result["moonraker"]["size_kb"] = total_size // 1024  # Convert bytes to KB
+        
+        # Check timelapse files
+        timelapse_dir = backup_dir / "timelapse"
+        if timelapse_dir.exists() and timelapse_dir.is_dir():
+            timelapse_files = [f for f in timelapse_dir.iterdir() if f.is_file()]
+            if timelapse_files:
+                result["timelapses"]["exists"] = True
+                result["timelapses"]["count"] = len(timelapse_files)
+                total_size = sum(f.stat().st_size for f in timelapse_files)
+                result["timelapses"]["size_kb"] = total_size // 1024  # Convert bytes to KB
+        
+        # Check gcode files
+        gcodes_dir = backup_dir / "gcodes"
+        if gcodes_dir.exists() and gcodes_dir.is_dir():
+            gcode_files = [f for f in gcodes_dir.iterdir() if f.is_file()]
+            if gcode_files:
+                result["gcodes"]["exists"] = True
+                result["gcodes"]["count"] = len(gcode_files)
+                total_size = sum(f.stat().st_size for f in gcode_files)
+                result["gcodes"]["size_kb"] = total_size // 1024  # Convert bytes to KB
+        
+        return result
+
+    def _update_restore_ui_with_sizes(self, sizes: dict[str, dict[str, int | bool]], has_moonraker: bool, has_timelapses: bool, has_gcodes: bool = False):
+        """Update restore dialog UI with size information."""
+        moonraker_info = sizes.get("moonraker", {})
+        timelapses_info = sizes.get("timelapses", {})
+        gcodes_info = sizes.get("gcodes", {})
+        
+        # Update Moonraker display
+        if moonraker_info.get("exists"):
+            count = moonraker_info.get("count", 0)
+            size_kb = moonraker_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.restore_dialog_moonraker_size_text.current:
+                self.restore_dialog_moonraker_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if moonraker exists
+            if self.restore_dialog_moonraker_checkbox.current:
+                self.restore_dialog_moonraker_checkbox.current.disabled = False
+                self.restore_dialog_moonraker_checkbox.current.label_style = None
+        else:
+            if self.restore_dialog_moonraker_size_text.current:
+                self.restore_dialog_moonraker_size_text.current.value = "None detected"
+            # Disable checkbox if moonraker doesn't exist (but only if other components exist, otherwise already disabled)
+            if self.restore_dialog_moonraker_checkbox.current and (has_timelapses or has_gcodes):
+                self.restore_dialog_moonraker_checkbox.current.disabled = True
+                self.restore_dialog_moonraker_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        
+        # Update Timelapses display
+        if timelapses_info.get("exists"):
+            count = timelapses_info.get("count", 0)
+            size_kb = timelapses_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.restore_dialog_timelapses_size_text.current:
+                self.restore_dialog_timelapses_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if timelapses exist
+            if self.restore_dialog_timelapses_checkbox.current:
+                self.restore_dialog_timelapses_checkbox.current.disabled = False
+                self.restore_dialog_timelapses_checkbox.current.label_style = None
+        else:
+            if self.restore_dialog_timelapses_size_text.current:
+                self.restore_dialog_timelapses_size_text.current.value = "None detected"
+            # Disable checkbox if timelapses don't exist (but only if other components exist, otherwise already disabled)
+            if self.restore_dialog_timelapses_checkbox.current and (has_moonraker or has_gcodes):
+                self.restore_dialog_timelapses_checkbox.current.disabled = True
+                self.restore_dialog_timelapses_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        
+        # Update GCodes display
+        if gcodes_info.get("exists"):
+            count = gcodes_info.get("count", 0)
+            size_kb = gcodes_info.get("size_kb", 0)
+            size_str = self.format_size(size_kb)
+            if self.restore_dialog_gcodes_size_text.current:
+                self.restore_dialog_gcodes_size_text.current.value = f"{count} file{'s' if count != 1 else ''}, {size_str}"
+            # Enable checkbox if gcodes exist
+            if self.restore_dialog_gcodes_checkbox.current:
+                self.restore_dialog_gcodes_checkbox.current.disabled = False
+                self.restore_dialog_gcodes_checkbox.current.label_style = None
+        else:
+            if self.restore_dialog_gcodes_size_text.current:
+                self.restore_dialog_gcodes_size_text.current.value = "None detected"
+            # Disable checkbox if gcodes don't exist (but only if other components exist, otherwise already disabled)
+            if self.restore_dialog_gcodes_checkbox.current and (has_moonraker or has_timelapses):
+                self.restore_dialog_gcodes_checkbox.current.disabled = True
+                self.restore_dialog_gcodes_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+
+    def on_restore_path_changed(self, e):
+        """Validate backup directory and show available components."""
+        backup_path = self.restore_dialog_path_field.current.value.strip()
+        
+        # Clear size displays initially
+        if self.restore_dialog_moonraker_size_text.current:
+            self.restore_dialog_moonraker_size_text.current.value = ""
+        if self.restore_dialog_timelapses_size_text.current:
+            self.restore_dialog_timelapses_size_text.current.value = ""
+        if self.restore_dialog_gcodes_size_text.current:
+            self.restore_dialog_gcodes_size_text.current.value = ""
+        
+        # Check if path is empty → hide checkboxes, disable button
+        if not backup_path:
+            self.restore_dialog_checkboxes_container.current.visible = False
+            self.restore_dialog_start_btn.current.disabled = True
+            self.page.update()
+            return
+        
+        # Check if path exists and is a directory → show error if not
+        backup_dir = Path(backup_path)
+        
+        if not backup_dir.exists():
+            self.show_snackbar("Selected path does not exist", ft.Colors.ORANGE)
+            self.restore_dialog_checkboxes_container.current.visible = False
+            self.restore_dialog_start_btn.current.disabled = True
+            self.page.update()
+            return
+        
+        if not backup_dir.is_dir():
+            self.show_snackbar("Selected path is not a directory", ft.Colors.ORANGE)
+            self.restore_dialog_checkboxes_container.current.visible = False
+            self.restore_dialog_start_btn.current.disabled = True
+            self.page.update()
+            return
+        
+        # Check for Moonraker stats files (data.mdb or moonraker-sql.db)
+        has_moonraker = (
+            (backup_dir / "data.mdb").exists() or 
+            (backup_dir / "moonraker-sql.db").exists()
+        )
+        
+        # Check for timelapse subdirectory
+        has_timelapses = (backup_dir / "timelapse").exists() and (backup_dir / "timelapse").is_dir()
+        
+        # Check for gcodes subdirectory
+        has_gcodes = (backup_dir / "gcodes").exists() and (backup_dir / "gcodes").is_dir()
+        
+        # Show error if no valid components found
+        if not has_moonraker and not has_timelapses and not has_gcodes:
+            self.show_snackbar("No valid backup components found in directory", ft.Colors.ORANGE)
+            self.restore_dialog_checkboxes_container.current.visible = False
+            self.restore_dialog_start_btn.current.disabled = True
+            self.page.update()
+            return
+        
+        # Show checkboxes container if at least one component exists
+        self.restore_dialog_checkboxes_container.current.visible = True
+        
+        # Always show all checkboxes (they'll be greyed out if component doesn't exist)
+        self.restore_dialog_moonraker_checkbox.current.visible = True
+        self.restore_dialog_timelapses_checkbox.current.visible = True
+        self.restore_dialog_gcodes_checkbox.current.visible = True
+        
+        # Query local backup sizes and update UI
+        sizes = self._query_local_backup_sizes(backup_dir)
+        self._update_restore_ui_with_sizes(sizes, has_moonraker, has_timelapses, has_gcodes)
+        
+        # Count how many components exist
+        component_count = sum([has_moonraker, has_timelapses, has_gcodes])
+        
+        # Configure Moonraker checkbox initial state
+        if has_moonraker:
+            self.restore_dialog_moonraker_checkbox.current.value = True
+            # Disable if it's the only option (user can't uncheck it)
+            self.restore_dialog_moonraker_checkbox.current.disabled = component_count == 1
+            if component_count == 1:
+                self.restore_dialog_moonraker_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        else:
+            self.restore_dialog_moonraker_checkbox.current.value = False
+            self.restore_dialog_moonraker_checkbox.current.disabled = True
+            self.restore_dialog_moonraker_checkbox.current.label_style = ft.TextStyle(
+                color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+            )
+        
+        # Configure Timelapses checkbox initial state
+        if has_timelapses:
+            self.restore_dialog_timelapses_checkbox.current.value = True
+            # Disable if it's the only option (user can't uncheck it)
+            self.restore_dialog_timelapses_checkbox.current.disabled = component_count == 1
+            if component_count == 1:
+                self.restore_dialog_timelapses_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        else:
+            self.restore_dialog_timelapses_checkbox.current.value = False
+            self.restore_dialog_timelapses_checkbox.current.disabled = True
+            self.restore_dialog_timelapses_checkbox.current.label_style = ft.TextStyle(
+                color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+            )
+        
+        # Configure GCodes checkbox initial state
+        if has_gcodes:
+            self.restore_dialog_gcodes_checkbox.current.value = True
+            # Disable if it's the only option (user can't uncheck it)
+            self.restore_dialog_gcodes_checkbox.current.disabled = component_count == 1
+            if component_count == 1:
+                self.restore_dialog_gcodes_checkbox.current.label_style = ft.TextStyle(
+                    color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+                )
+        else:
+            self.restore_dialog_gcodes_checkbox.current.value = False
+            self.restore_dialog_gcodes_checkbox.current.disabled = True
+            self.restore_dialog_gcodes_checkbox.current.label_style = ft.TextStyle(
+                color=ft.Colors.with_opacity(0.38, ft.Colors.ON_SURFACE)
+            )
+        
+        # Enable Start Restore button since at least one component exists
+        self.restore_dialog_start_btn.current.disabled = False
+        
+        self.page.update()
+
+    def on_restore_component_changed(self, e):
+        """Update Start Restore button state based on checkbox selection."""
+        # Check if at least one enabled checkbox is selected
+        moonraker_checked = (
+            self.restore_dialog_moonraker_checkbox.current.value 
+            if (self.restore_dialog_moonraker_checkbox.current.visible and 
+                not self.restore_dialog_moonraker_checkbox.current.disabled)
+            else False
+        )
+        timelapses_checked = (
+            self.restore_dialog_timelapses_checkbox.current.value 
+            if (self.restore_dialog_timelapses_checkbox.current.visible and 
+                not self.restore_dialog_timelapses_checkbox.current.disabled)
+            else False
+        )
+        gcodes_checked = (
+            self.restore_dialog_gcodes_checkbox.current.value 
+            if (self.restore_dialog_gcodes_checkbox.current.visible and 
+                not self.restore_dialog_gcodes_checkbox.current.disabled)
+            else False
+        )
+        
+        # Disable Start Restore button when all enabled checkboxes are unchecked
+        # Enable Start Restore button when at least one checkbox is checked
+        if self.restore_dialog_start_btn.current:
+            self.restore_dialog_start_btn.current.disabled = not (moonraker_checked or timelapses_checked or gcodes_checked)
+            self.page.update()
+
+    def handle_restore_dialog_confirm(self, e):
+        """Execute restore with selected components."""
+        # Validate that backup path is not empty
+        backup_path = self.restore_dialog_path_field.current.value.strip()
+        
+        if not backup_path:
+            self.show_snackbar("Please select a backup directory", ft.Colors.ORANGE)
+            return
+        
+        # Get checkbox states for enabled checkboxes
+        moonraker_checked = (
+            self.restore_dialog_moonraker_checkbox.current.value 
+            if (self.restore_dialog_moonraker_checkbox.current.visible and 
+                not self.restore_dialog_moonraker_checkbox.current.disabled)
+            else False
+        )
+        timelapses_checked = (
+            self.restore_dialog_timelapses_checkbox.current.value 
+            if (self.restore_dialog_timelapses_checkbox.current.visible and 
+                not self.restore_dialog_timelapses_checkbox.current.disabled)
+            else False
+        )
+        gcodes_checked = (
+            self.restore_dialog_gcodes_checkbox.current.value 
+            if (self.restore_dialog_gcodes_checkbox.current.visible and 
+                not self.restore_dialog_gcodes_checkbox.current.disabled)
+            else False
+        )
+        
+        # Validate that at least one component is selected
+        if not moonraker_checked and not timelapses_checked and not gcodes_checked:
+            self.show_snackbar("Please select at least one component to restore", ft.Colors.ORANGE)
+            return
+        
+        # Dismiss dialog after validation passes
+        self.dismiss_restore_dialog()
+        
+        # Call run_command with action "restore" and pass component flags
+        self.run_command(
+            "restore",
+            backup_dir=backup_path,
+            restore_moonraker=moonraker_checked,
+            restore_timelapses=timelapses_checked,
+            restore_gcodes=gcodes_checked,
+        )
 
     def quick_restore(self):
         """Quick restore action."""
@@ -842,12 +2032,6 @@ class PrinterInstallerGUI:
             if self.backup_dialog_path_field.current:
                 self.backup_dialog_path_field.current.value = e.path
                 self.page.update()
-
-    def on_browse_button_click(self, e):
-        """Handle browse button click - always enabled."""
-        self.backup_path_picker.get_directory_path(
-            dialog_title="Select Backup Directory", initial_directory=self.current_dir
-        )
 
     def strip_ansi_codes(self, text: str) -> str:
         """Remove ANSI color codes from text."""
@@ -867,18 +2051,50 @@ class PrinterInstallerGUI:
             args.append("--key-only")
         elif action == "backup":
             backup_dir = kwargs.get("backup_dir", "")
-            if backup_dir:
-                args.extend(["--backup-only", backup_dir])
-            else:
+            backup_moonraker = kwargs.get("backup_moonraker", False)
+            backup_timelapses = kwargs.get("backup_timelapses", False)
+            backup_gcodes = kwargs.get("backup_gcodes", False)
+            
+            if not backup_dir:
                 self.show_snackbar("Please select a backup directory", ft.Colors.ORANGE)
                 return None
+            
+            # Validate that at least one component is selected
+            if not backup_moonraker and not backup_timelapses and not backup_gcodes:
+                self.show_snackbar("Please select at least one component", ft.Colors.ORANGE)
+                return None
+            
+            # Use --backup-only with component flags
+            args.extend(["--backup-only", backup_dir])
+            if backup_moonraker:
+                args.append("--backup-moonraker")
+            if backup_timelapses:
+                args.append("--backup-timelapses")
+            if backup_gcodes:
+                args.append("--backup-gcodes")
         elif action == "restore":
             backup_dir = kwargs.get("backup_dir", "")
-            if backup_dir:
-                args.extend(["--restore-only", backup_dir])
-            else:
+            restore_moonraker = kwargs.get("restore_moonraker", False)
+            restore_timelapses = kwargs.get("restore_timelapses", False)
+            restore_gcodes = kwargs.get("restore_gcodes", False)
+            
+            if not backup_dir:
                 self.show_snackbar("Please select a backup directory", ft.Colors.ORANGE)
                 return None
+            
+            # Validate that at least one component is selected
+            if not restore_moonraker and not restore_timelapses and not restore_gcodes:
+                self.show_snackbar("Please select at least one component", ft.Colors.ORANGE)
+                return None
+            
+            # Use --restore-only with component flags
+            args.extend(["--restore-only", backup_dir])
+            if restore_moonraker:
+                args.append("--restore-moonraker")
+            if restore_timelapses:
+                args.append("--restore-timelapses")
+            if restore_gcodes:
+                args.append("--restore-gcodes")
         elif action == "reset_only":
             args.append("--reset-only")
             if kwargs.get("with_backup"):
@@ -915,10 +2131,10 @@ class PrinterInstallerGUI:
                 args.append("--reset")
             if self.preserve_stats_checkbox.current.value:
                 args.append("--preserve-stats")
-            if self.restore_backup_checkbox.current.value:
-                backup_path = self.backup_path_field.current.value
-                if backup_path:
-                    args.extend(["--restore-backup", backup_path])
+            if self.preserve_timelapses_checkbox.current.value:
+                args.append("--preserve-timelapses")
+            if self.preserve_gcodes_checkbox.current.value:
+                args.append("--preserve-gcodes")
             if bootstrap_selected:
                 args.append("--run-bootstrap")
             if k2_selected:
