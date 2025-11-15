@@ -18,8 +18,8 @@ import customtkinter as ctk
 # =============================================================================
 
 # External tools / services
-ESTIMATOR_PATH = "/Applications/klipper_estimator_osx"
-MOONRAKER_URL = "http://192.168.1.4:7125"
+ESTIMATOR_PATH = r"C:\klipper_estimator\klipper_estimator.exe"
+MOONRAKER_URL = "http://192.168.50.93:7125"
 MOONRAKER_TIMEOUT = 2  # seconds
 
 # Feature flags
