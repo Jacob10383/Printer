@@ -166,10 +166,13 @@ class PrinterInstaller:
     def install_mainsail(self) -> bool:
         return self.run_installer("mainsail", "mainsail_install.py")
 
+    def install_shaketune(self) -> bool:
+        return self.run_installer("shaketune", "shaketune_install.py")
+
     # ------------------------------------------------------------------ #
     def run_installation(self, components: Optional[List[str]] = None) -> bool:
         if components is None:
-            components = ["guppyscreen", "ustreamer", "overrides", "cleanup", "resonance", "timelapse", "mainsail"]
+            components = ["guppyscreen", "ustreamer", "overrides", "cleanup", "resonance", "shaketune", "timelapse", "mainsail"]
 
         self.logger.info("Starting 3D Printer Installation...")
         self.logger.info("Components to install: %s", ", ".join(components))
@@ -200,6 +203,8 @@ class PrinterInstaller:
             _record("timelapse (H264)", self.install_timelapse_h264)
         if "mainsail" in components:
             _record("mainsail", self.install_mainsail)
+        if "shaketune" in components:
+            _record("shaketune", self.install_shaketune)
 
         self.logger.info("=" * 50)
         self.logger.info("INSTALLATION SUMMARY")
@@ -223,7 +228,7 @@ def main() -> None:
     parser.add_argument(
         "--components",
         nargs="+",
-        choices=["guppyscreen", "ustreamer", "kamp", "overrides", "cleanup", "resonance", "timelapse", "timelapseh264", "mainsail"],
+        choices=["guppyscreen", "ustreamer", "kamp", "overrides", "cleanup", "resonance", "shaketune", "timelapse", "timelapseh264", "mainsail"],
         help="Specific components to install (default: all)",
     )
 

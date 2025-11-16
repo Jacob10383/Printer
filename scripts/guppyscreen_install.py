@@ -28,6 +28,12 @@ def stop_existing_service() -> None:
     shell.run("killall -9 guppyscreen 2>/dev/null || true")
 
 
+def kill_display_server(reason: str) -> None:
+    """Force-stop the legacy display-server process with context for logging."""
+    logger.info("Stopping display-server (%s)", reason)
+    shell.run("killall -9 display-server 2>/dev/null || true")
+
+
 def disable_original_display_server() -> bool:
     logger.info("Ensuring original display server is disabled...")
     display_bin = Path("/usr/bin/display-server")
@@ -35,21 +41,24 @@ def disable_original_display_server() -> bool:
 
     if disabled_bin.exists():
         logger.info("display-server already disabled")
+        kill_display_server("already disabled check")
         return True
 
     if not display_bin.exists():
         logger.info("display-server binary not found; assuming disabled")
         return True
 
-    shell.run("killall -9 display-server 2>/dev/null || true")
+    kill_display_server("pre-disable")
 
     try:
         os.replace(display_bin, disabled_bin)
         logger.info("Disabled original display server")
-        return True
     except Exception as exc:  # pragma: no cover - best effort
         logger.error("Failed to disable display-server: %s", exc)
         return False
+
+    kill_display_server("post-disable verification")
+    return True
 
 
 def install_files() -> bool:
