@@ -30,7 +30,7 @@ def download_and_extract() -> bool:
     wget = "/opt/bin/wget" if Path("/opt/bin/wget").exists() else "wget"
     unzip = "/opt/bin/unzip" if Path("/opt/bin/unzip").exists() else "unzip"
 
-    if not shell.run_logged(f"{wget} -q -O mainsail.zip https://github.com/Jacob10383/mainsail/releases/latest/download/mainsail.zip", logger_name="mainsail").ok:
+    if not shell.run_logged(f"{wget} -q -O mainsail.zip https://github.com/mainsail-crew/mainsail/releases/latest/download/mainsail.zip", logger_name="mainsail").ok:
         return False
     if not shell.run_logged(f"{unzip} -o -q mainsail.zip", logger_name="mainsail").ok:
         return False

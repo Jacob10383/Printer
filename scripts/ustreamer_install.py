@@ -253,7 +253,7 @@ def extract_camera_name(json_response: str) -> str:
 def check_camera_configured_correctly(json_response: str, target_ip: str) -> bool:
     good_stream = f'"stream_url"\s*:\s*"http://{target_ip}:8080/stream"' in json_response
     good_snap = f'"snapshot_url"\s*:\s*"http://{target_ip}:8080/snapshot"' in json_response
-    good_service = '"service"\s*:\s*"mjpegstreamer"' in json_response
+    good_service = '"service"\s*:\s*"uv4l-mjpeg"' in json_response
     return good_stream and good_snap and good_service
 
 
@@ -273,7 +273,7 @@ def update_camera(ip_address: str, camera_name: str) -> bool:
     encoded_name = parse.quote(camera_name)
     payload = {
         "name": camera_name,
-        "service": "mjpegstreamer",
+        "service": "uv4l-mjpeg",
         "stream_url": f"http://{ip_address}:8080/stream",
         "snapshot_url": f"http://{ip_address}:8080/snapshot",
     }
@@ -287,7 +287,7 @@ def update_camera(ip_address: str, camera_name: str) -> bool:
 def create_camera(ip_address: str) -> bool:
     payload = {
         "name": "Front",
-        "service": "mjpegstreamer",
+        "service": "uv4l-mjpeg",
         "stream_url": f"http://{ip_address}:8080/stream",
         "snapshot_url": f"http://{ip_address}:8080/snapshot",
     }

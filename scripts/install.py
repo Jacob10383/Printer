@@ -26,6 +26,29 @@ class ComponentResult:
     details: Optional[str] = None
 
 
+@dataclass
+class ComponentConfig:
+    name: str
+    slug: str
+    script: str
+    args: Optional[List[str]] = None
+    default_active: bool = True
+
+
+AVAILABLE_COMPONENTS = [
+    ComponentConfig("Guppy Screen", "guppyscreen", "guppyscreen_install.py"),
+    ComponentConfig("uStreamer", "ustreamer", "ustreamer_install.py"),
+    ComponentConfig("KAMP", "kamp", "kamp_install.py", default_active=False),
+    ComponentConfig("Overrides", "overrides", "overrides_install.py"),
+    ComponentConfig("Cleanup Service", "cleanup", "cleanup_install.py"),
+    ComponentConfig("Resonance Tester", "resonance", "resonance_install.py"),
+    ComponentConfig("Timelapse", "timelapse", "timelapse_install.py"),
+    ComponentConfig("Timelapse (H264)", "timelapseh264", "timelapse_install.py", args=["--encoder", "h264"], default_active=False),
+    ComponentConfig("Mainsail", "mainsail", "mainsail_install.py"),
+    ComponentConfig("ShakeTune", "shaketune", "shaketune_install.py"),
+]
+
+
 class PrinterInstaller:
     def __init__(self) -> None:
         self.logger = get_logger("install")
@@ -138,73 +161,25 @@ class PrinterInstaller:
         self.logger.error("%s installation failed with return code %s", component_name, return_code)
         return False
 
-    # Individual component wrappers
-    def install_ustreamer(self) -> bool:
-        return self.run_installer("ustreamer", "ustreamer_install.py")
-
-    def install_guppyscreen(self) -> bool:
-        return self.run_installer("guppyscreen", "guppyscreen_install.py")
-
-    def install_kamp(self) -> bool:
-        return self.run_installer("KAMP", "kamp_install.py")
-
-    def install_overrides(self) -> bool:
-        return self.run_installer("overrides", "overrides_install.py")
-
-    def install_cleanup_service(self) -> bool:
-        return self.run_installer("cleanup service", "cleanup_install.py")
-
-    def install_resonance_tester(self) -> bool:
-        return self.run_installer("resonance tester", "resonance_install.py")
-
-    def install_timelapse(self) -> bool:
-        return self.run_installer("timelapse", "timelapse_install.py")
-
-    def install_timelapse_h264(self) -> bool:
-        return self.run_installer("timelapse (H264)", "timelapse_install.py", extra_args=["--encoder", "h264"])
-
-    def install_mainsail(self) -> bool:
-        return self.run_installer("mainsail", "mainsail_install.py")
-
-    def install_shaketune(self) -> bool:
-        return self.run_installer("shaketune", "shaketune_install.py")
-
     # ------------------------------------------------------------------ #
-    def run_installation(self, components: Optional[List[str]] = None) -> bool:
-        if components is None:
-            components = ["guppyscreen", "ustreamer", "overrides", "cleanup", "resonance", "shaketune", "timelapse", "mainsail"]
+    def run_installation(self, selected_slugs: Optional[List[str]] = None) -> bool:
+        if not selected_slugs:
+            selected_slugs = [c.slug for c in AVAILABLE_COMPONENTS if c.default_active]
 
         self.logger.info("Starting 3D Printer Installation...")
-        self.logger.info("Components to install: %s", ", ".join(components))
+        self.logger.info("Components to install: %s", ", ".join(selected_slugs))
 
         results: List[ComponentResult] = []
 
-        def _record(name: str, installer_fn) -> None:
-            log_section(f"Running {name} installer")
-            success = installer_fn()
-            results.append(ComponentResult(name, success))
-
-        # Maintain same ordering as before
-        if "guppyscreen" in components:
-            _record("guppyscreen", self.install_guppyscreen)
-        if "ustreamer" in components:
-            _record("ustreamer", self.install_ustreamer)
-        if "kamp" in components:
-            _record("kamp", self.install_kamp)
-        if "overrides" in components:
-            _record("overrides", self.install_overrides)
-        if "cleanup" in components:
-            _record("cleanup", self.install_cleanup_service)
-        if "resonance" in components:
-            _record("resonance", self.install_resonance_tester)
-        if "timelapse" in components:
-            _record("timelapse", self.install_timelapse)
-        if "timelapseh264" in components:
-            _record("timelapse (H264)", self.install_timelapse_h264)
-        if "mainsail" in components:
-            _record("mainsail", self.install_mainsail)
-        if "shaketune" in components:
-            _record("shaketune", self.install_shaketune)
+        for component in AVAILABLE_COMPONENTS:
+            if component.slug in selected_slugs:
+                log_section(f"Running {component.name} installer")
+                success = self.run_installer(
+                    component.name,
+                    component.script,
+                    extra_args=component.args
+                )
+                results.append(ComponentResult(component.name, success))
 
         self.logger.info("=" * 50)
         self.logger.info("INSTALLATION SUMMARY")
@@ -225,10 +200,13 @@ class PrinterInstaller:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="3D Printer Automated Installer")
+    
+    valid_slugs = [c.slug for c in AVAILABLE_COMPONENTS]
+    
     parser.add_argument(
         "--components",
         nargs="+",
-        choices=["guppyscreen", "ustreamer", "kamp", "overrides", "cleanup", "resonance", "shaketune", "timelapse", "timelapseh264", "mainsail"],
+        choices=valid_slugs,
         help="Specific components to install (default: all)",
     )
 
@@ -248,7 +226,7 @@ def main() -> None:
         os.execv(sys.executable, [sys.executable, *sys.argv])
 
     try:
-        success = installer.run_installation(components=args.components)
+        success = installer.run_installation(selected_slugs=args.components)
         sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         print("\n\nInstallation interrupted by user")

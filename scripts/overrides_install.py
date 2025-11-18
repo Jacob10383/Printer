@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -61,17 +62,52 @@ def update_bed_mesh_minval() -> bool:
         return False
 
     content = target_file.read_text()
-    pattern = "move_check_distance"
-    if 'minval=1' in content.replace(" ", ""):
+    # If already patched, exit early
+    already_patched = re.search(
+        r"getfloat\(\s*['\"]move_check_distance['\"][^)]*?\bminval\s*=\s*1(?:\.0*)?",
+        content,
+        flags=re.DOTALL,
+    )
+    if already_patched:
         logger.info("bed_mesh.py already patched; nothing to do")
         return True
 
-    import re
+    # First try: replace any existing minval assignment inside the move_check_distance getfloat call
+    replace_minval = re.compile(
+        r"(getfloat\(\s*['\"]move_check_distance['\"][^)]*?\bminval\s*=\s*)([0-9]+(?:\.[0-9]*)?)",
+        flags=re.DOTALL,
+    )
+    new_content, num_subs = replace_minval.subn(r"\g<1>1", content, count=1)
 
-    regex = r'(["\']move_check_distance["\']\s*,\s*5(?:\.0*)?\s*,\s*minval\s*=\s*)([0-9]+(?:\.[0-9]*)?)'
-    new_content, num_subs = re.subn(regex, r"\g<1>1", content, count=1)
+    # Second try: if there was no minval argument, insert one before the closing paren
     if num_subs == 0:
-        logger.error("Move check distance pattern not found in %s", target_file)
+        def _add_minval(match: re.Match) -> str:
+            args_part = match.group(1).rstrip()
+            suffix = match.group(2)
+            if args_part.endswith("("):
+                sep = ""
+            elif args_part.endswith(","):
+                sep = " "
+            else:
+                sep = ", "
+            return f"{args_part}{sep}minval=1{suffix}"
+
+        add_minval = re.compile(
+            r"(getfloat\(\s*['\"]move_check_distance['\"][^)]*)(\))",
+            flags=re.DOTALL,
+        )
+        new_content, num_subs = add_minval.subn(_add_minval, content, count=1)
+
+    if num_subs == 0:
+        logger.error("Move check distance call not found in %s", target_file)
+        return False
+
+    verify_pattern = re.compile(
+        r"getfloat\(\s*['\"]move_check_distance['\"][^)]*?\bminval\s*=\s*1(?:\.0*)?",
+        flags=re.DOTALL,
+    )
+    if not verify_pattern.search(new_content):
+        logger.error("Failed to set minval=1 in %s", target_file)
         return False
 
     backup_path = target_file.with_suffix(target_file.suffix + ".bak")

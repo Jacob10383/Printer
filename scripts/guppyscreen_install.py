@@ -19,6 +19,8 @@ BINARY_DST = GUPPY_DIR / "guppyscreen"
 CONFIG_DST = GUPPY_DIR / "guppyconfig.json"
 SERVICE_SRC = SERVICES_DIR / "guppyscreen-service"
 SERVICE_DST = Path("/etc/init.d/guppyscreen")
+BOOT_PLAY_BIN = Path("/sbin/boot-play")
+BOOT_PLAY_DISABLED = BOOT_PLAY_BIN.with_suffix(BOOT_PLAY_BIN.suffix + ".disabled")
 
 logger = get_logger("guppyscreen")
 
@@ -58,6 +60,27 @@ def disable_original_display_server() -> bool:
         return False
 
     kill_display_server("post-disable verification")
+    return True
+
+
+def disable_boot_play_binary() -> bool:
+    """Rename /sbin/boot-play so it cannot be started."""
+    logger.info("Disabling boot-play binary...")
+    if BOOT_PLAY_DISABLED.exists():
+        logger.info("boot-play already disabled")
+        return True
+    if not BOOT_PLAY_BIN.exists():
+        logger.info("boot-play binary not found; assuming disabled")
+        return True
+
+    try:
+        os.replace(BOOT_PLAY_BIN, BOOT_PLAY_DISABLED)
+        logger.info("Renamed %s to %s", BOOT_PLAY_BIN, BOOT_PLAY_DISABLED)
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.error("Failed to disable boot-play: %s", exc)
+        return False
+
+    shell.run("killall -9 boot-play 2>/dev/null || true")
     return True
 
 
@@ -130,6 +153,9 @@ def main() -> None:
     stop_existing_service()
 
     if not disable_original_display_server():
+        overall_success = False
+
+    if not disable_boot_play_binary():
         overall_success = False
 
     if not install_files():
