@@ -41,22 +41,13 @@ def install_kamp() -> bool:
         return False
     logger.info("Copied KAMP directory to %s", kamp_dst)
 
-    settings_src = CONFIGS_DIR / "KAMP_Settings.cfg"
-    settings_dst = CONFIG_DIR / "KAMP_Settings.cfg"
-    if not settings_src.exists():
-        logger.error("KAMP_Settings.cfg not found at %s", settings_src)
-        return False
-
-    copy_file(settings_src, settings_dst)
-    logger.info("Installed %s", settings_dst)
-
     main_printer_cfg = CONFIG_DIR / "printer.cfg"
     if not main_printer_cfg.exists():
         logger.error("printer.cfg not found at %s; cannot add include", main_printer_cfg)
         return False
 
-    ensure_include_block(main_printer_cfg, ["KAMP_Settings.cfg"])
-    logger.info("Ensured printer.cfg includes KAMP_Settings.cfg")
+    ensure_include_block(main_printer_cfg, ["KAMP/KAMP_Settings.cfg"])
+    logger.info("Ensured printer.cfg includes KAMP/KAMP_Settings.cfg")
     return True
 
 

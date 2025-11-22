@@ -27,8 +27,23 @@ def ensure_include_block(path: Path | str, includes: Iterable[str], *, prepend: 
     includes_set = {inc.strip() for inc in includes}
     filtered = [line for line in lines if (match := pattern.match(line)) is None or match.group(1).strip() not in includes_set]
 
+    # Find SAVE_CONFIG marker if it exists
+    save_config_idx = None
+    for idx, line in enumerate(filtered):
+        if line.strip().startswith("#*# <") and "SAVE_CONFIG" in line:
+            save_config_idx = idx
+            break
+
     include_lines = [f"[include {item}]" for item in includes]
-    new_lines = include_lines + filtered if prepend else filtered + include_lines
+    
+    if prepend:
+        new_lines = include_lines + filtered
+    elif save_config_idx is not None:
+        # Insert includes before SAVE_CONFIG block
+        new_lines = filtered[:save_config_idx] + include_lines + filtered[save_config_idx:]
+    else:
+        # No SAVE_CONFIG block, append to end
+        new_lines = filtered + include_lines
 
     if new_lines == lines:
         return True

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import re
 import shutil
@@ -15,7 +16,7 @@ from lib.logging_utils import get_logger  # noqa: E402
 from lib.config_editors import ensure_include_block  # noqa: E402
 from lib.paths import CONFIGS_DIR, CUSTOM_CONFIG_DIR  # noqa: E402
 
-logger = get_logger("overrides")
+logger = get_logger("macros")
 CONFIG_DIR = CUSTOM_CONFIG_DIR.parent
 
 
@@ -25,33 +26,28 @@ def _replace_symlink_if_needed(path: Path) -> None:
         path.unlink()
 
 
-def install_custom_configs() -> bool:
-    logger.info("Installing custom config files...")
-    ensure_directory(CUSTOM_CONFIG_DIR)
-
-    targets = ["macros.cfg", "start_print.cfg", "overrides.cfg"]
-    success = True
-    for filename in targets:
-        src = CONFIGS_DIR / filename
-        dst = CUSTOM_CONFIG_DIR / filename
-        if not src.exists():
-            logger.error("Source file missing: %s", src)
-            success = False
-            continue
-        _replace_symlink_if_needed(dst)
-        try:
-            copy_file(src, dst)
-            logger.info("Installed %s", dst)
-        except Exception as exc:
-            logger.error("Failed to copy %s -> %s: %s", src, dst, exc)
-            success = False
-    return success
+def install_file(filename: str) -> bool:
+    src = CONFIGS_DIR / filename
+    dst = CUSTOM_CONFIG_DIR / filename
+    if not src.exists():
+        logger.error("Source file missing: %s", src)
+        return False
+    
+    _replace_symlink_if_needed(dst)
+    try:
+        copy_file(src, dst)
+        logger.info("Installed %s", dst)
+        return True
+    except Exception as exc:
+        logger.error("Failed to copy %s -> %s: %s", src, dst, exc)
+        return False
 
 
-def update_custom_main_cfg() -> bool:
-    logger.info("Ensuring custom/main.cfg includes macros/start_print/overrides...")
+def update_main_includes(includes: list) -> bool:
+    if not includes:
+        return True
+    logger.info("Ensuring custom/main.cfg includes: %s", ", ".join(includes))
     main_cfg = CUSTOM_CONFIG_DIR / "main.cfg"
-    includes = ["macros.cfg", "start_print.cfg", "overrides.cfg"]
     return ensure_include_block(main_cfg, includes)
 
 
@@ -119,14 +115,48 @@ def update_bed_mesh_minval() -> bool:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Install Klipper macros and overrides.")
+    parser.add_argument("--macros", action="store_true", help="Install macros.cfg")
+    parser.add_argument("--start-print", action="store_true", help="Install start_print.cfg")
+    parser.add_argument("--overrides", action="store_true", help="Install overrides.cfg")
+    parser.add_argument("--all", action="store_true", help="Install all components (default if no args)")
+
+    args = parser.parse_args()
+
+    # Default to all if no specific flags provided
+    if not any([args.macros, args.start_print, args.overrides, args.all]):
+        args.all = True
+
     if os.geteuid() != 0:
         logger.error("This installer must be run as root (use sudo)")
         sys.exit(1)
 
-    success_configs = install_custom_configs()
-    success_main_cfg = update_custom_main_cfg()
-    success_bed_mesh = update_bed_mesh_minval()
-    success = success_configs and success_main_cfg and success_bed_mesh
+    ensure_directory(CUSTOM_CONFIG_DIR)
+    
+    success = True
+    files_to_install = []
+    
+    if args.all or args.macros:
+        files_to_install.append("macros.cfg")
+    if args.all or args.start_print:
+        files_to_install.append("start_print.cfg")
+    if args.all or args.overrides:
+        files_to_install.append("overrides.cfg")
+
+    for filename in files_to_install:
+        if not install_file(filename):
+            success = False
+    
+    # Update main.cfg to include whatever we just installed/verified
+    if files_to_install:
+        if not update_main_includes(files_to_install):
+            success = False
+
+    # Bed mesh fix is bundled with overrides
+    if args.all or args.overrides:
+        if not update_bed_mesh_minval():
+            success = False
+
     if not success:
         sys.exit(1)
 
