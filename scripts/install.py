@@ -44,7 +44,7 @@ AVAILABLE_COMPONENTS = [
     ComponentConfig("Start Print Only", "start_print", "macros_install.py", args=["--start-print"], default_active=False),
     ComponentConfig("Overrides Only", "overrides", "macros_install.py", args=["--overrides"], default_active=False),
     ComponentConfig("Cleanup Service", "cleanup", "cleanup_install.py"),
-    ComponentConfig("Resonance Tester", "resonance", "resonance_install.py"),
+
     ComponentConfig("Timelapse", "timelapse", "timelapse_install.py"),
     ComponentConfig("Timelapse (H264)", "timelapseh264", "timelapse_install.py", args=["--encoder", "h264"], default_active=False),
     ComponentConfig("Mainsail", "mainsail", "mainsail_install.py"),
