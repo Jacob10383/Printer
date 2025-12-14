@@ -79,6 +79,8 @@ def ensure_environment() -> bool:
     return True
 
 
+
+
 def ensure_git_available() -> bool:
     if GIT_DEST.exists() or GIT_DEST.is_symlink():
         return True
@@ -254,19 +256,45 @@ def patch_heaters_np_int() -> bool:
 
 
 def install_custom_shaper_calibrate() -> bool:
+    """Install custom shaper_calibrate.py patch with validation."""
     source = PATCHES_DIR / "shaper_calibrate.py"
     destination = ROOT_KLIPPER_EXTRAS_DIR / "shaper_calibrate.py"
 
     if not source.exists():
         logger.error("Custom shaper_calibrate.py not found at %s", source)
         return False
+    
+    src_size = source.stat().st_size
+    if src_size == 0:
+        logger.error("Source file %s is 0 bytes! Cannot install corrupted patch.", source)
+        return False
 
-    logger.info("Installing patched shaper_calibrate.py to %s", destination)
+    logger.info("Installing patched shaper_calibrate.py (%d bytes) to %s", src_size, destination)
     try:
         copy_file(source, destination)
+        
+        # Verify the installation
+        if not destination.exists():
+            logger.error("Installation failed: %s does not exist after copy", destination)
+            return False
+        
+        dst_size = destination.stat().st_size
+        if dst_size != src_size:
+            logger.error(
+                "Installation failed: size mismatch. Expected %d bytes, got %d bytes",
+                src_size, dst_size
+            )
+            destination.unlink(missing_ok=True)
+            return False
+        
+        logger.info("Successfully installed shaper_calibrate.py (%d bytes)", dst_size)
+        
     except Exception as exc:
         logger.error("Failed to install shaper_calibrate.py: %s", exc)
+        if destination.exists():
+            destination.unlink(missing_ok=True)
         return False
+    
     return True
 
 
@@ -285,13 +313,20 @@ def create_cpython_symlinks() -> None:
 
 
 def install_runtime_libs() -> bool:
+    """Install required runtime libraries with comprehensive validation."""
     for name in LIB_NAMES:
         src = BINARIES_DIR / name
         dst = Path("/usr/lib") / name
         
-        # Check if library already exists(carto installer)
+        # Check if library already exists (e.g., from carto installer)
         if dst.exists() and not dst.is_symlink():
-            logger.info("Library %s already exists at %s; skipping", name, dst)
+            dst_size = dst.stat().st_size
+            logger.info("Library %s already exists at %s (%d bytes); skipping", name, dst, dst_size)
+            
+            # Warn if existing file is suspiciously small
+            if dst_size == 0:
+                logger.warning("WARNING: Existing library %s is 0 bytes! This may indicate a previous failed installation.", dst)
+            
             continue
             
         if not src.exists():
@@ -302,21 +337,81 @@ def install_runtime_libs() -> bool:
                     name, BINARIES_DIR, dst.parent, name
                 )
                 return False
-            # dst exists as symlink, we'll overwrite it
+            # dst exists as symlink, we'll use it
             logger.info("Library %s exists as symlink at %s; will use existing", name, dst)
             continue
+        
+        # Get source file info for validation
+        src_size = src.stat().st_size
+        logger.info("Preparing to copy %s (%d bytes) to %s", src, src_size, dst)
+        
+        if src_size == 0:
+            logger.error("Source library %s is 0 bytes! Cannot install corrupted library.", src)
+            return False
+        
+        # Perform the copy with verification
+        try:
+            copy_file(src, dst)
             
-        logger.info("Copying %s to %s", src, dst)
-        copy_file(src, dst)
+            # Double-check the copy succeeded
+            if not dst.exists():
+                logger.error("CRITICAL: Copy operation reported success but destination file %s does not exist!", dst)
+                return False
+            
+            dst_size = dst.stat().st_size
+            logger.info("Successfully copied %s: %d bytes -> %d bytes", name, src_size, dst_size)
+            
+            # Verify sizes match
+            if dst_size != src_size:
+                logger.error(
+                    "CRITICAL: Size mismatch after copying %s! Source: %d bytes, Destination: %d bytes",
+                    name, src_size, dst_size
+                )
+                # Clean up the corrupted file
+                dst.unlink(missing_ok=True)
+                return False
+            
+            if dst_size == 0:
+                logger.error("CRITICAL: Destination file %s is 0 bytes after copy!", dst)
+                # Clean up the corrupted file
+                dst.unlink(missing_ok=True)
+                return False
+                
+        except Exception as exc:
+            logger.error("Failed to copy %s to %s: %s", src, dst, exc)
+            # Clean up any partial copy
+            if dst.exists():
+                dst.unlink(missing_ok=True)
+            return False
 
     # Create libgfortran symlink if needed
     target = Path("/usr/lib/libgfortran.so.5.0.0")
     symlink = Path("/usr/lib/libgfortran.so.5")
-    if target.exists():
-        if symlink.exists() or symlink.is_symlink():
-            symlink.unlink()
-        symlink.symlink_to(target.name)
-        logger.info("Linked %s -> %s", symlink, target.name)
+    
+    if not target.exists():
+        logger.warning("Target library %s does not exist; cannot create symlink", target)
+    else:
+        target_size = target.stat().st_size
+        if target_size == 0:
+            logger.error("CRITICAL: Target library %s is 0 bytes! Cannot create symlink to corrupted file.", target)
+            return False
+        
+        try:
+            if symlink.exists() or symlink.is_symlink():
+                symlink.unlink()
+            symlink.symlink_to(target.name)
+            logger.info("Linked %s -> %s (target: %d bytes)", symlink, target.name, target_size)
+            
+            # Verify the symlink was created correctly
+            if not symlink.is_symlink():
+                logger.error("Failed to create symlink %s -> %s", symlink, target.name)
+                return False
+                
+        except Exception as exc:
+            logger.error("Failed to create symlink %s -> %s: %s", symlink, target.name, exc)
+            return False
+    
+    logger.info("All runtime libraries installed and verified successfully")
     return True
 
 
@@ -343,6 +438,7 @@ def link_into_klipper() -> bool:
 def install_shaketune() -> bool:
     if not ensure_environment():
         return False
+    
     ensure_git_available()
     if not deploy_shaketune_repo():
         return False
