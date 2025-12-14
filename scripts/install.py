@@ -49,6 +49,7 @@ AVAILABLE_COMPONENTS = [
     ComponentConfig("Timelapse (H264)", "timelapseh264", "timelapse_install.py", args=["--encoder", "h264"], default_active=False),
     ComponentConfig("Mainsail", "mainsail", "mainsail_install.py"),
     ComponentConfig("ShakeTune", "shaketune", "shaketune_install.py"),
+    ComponentConfig("Non Critical Carto", "non_critical_carto", "non_critical_carto_install.py"),
 ]
 
 
