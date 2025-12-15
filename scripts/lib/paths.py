@@ -19,6 +19,7 @@ MOONRAKER_ASVC = PRINTER_DATA_DIR / "moonraker.asvc"
 CUSTOM_CONFIG_DIR = PRINTER_DATA_DIR / "config" / "custom"
 GUPPY_DIR = ROOT_HOME / "guppyscreen"
 MAINTENANCE_DIR = ROOT_HOME / "mainsail"
+KLIPPER_EXTRAS_DIR = ROOT_HOME / "klipper/klippy/extras"
 
 
 def repo_path(*parts: str | Path) -> Path:

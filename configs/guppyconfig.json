@@ -3,7 +3,7 @@
   "default_printer": "k2",
   "display_rotate": 3,
   "display_sleep_sec": 600,
-  "guppy_init_script": "/etc/init.d/S99guppyscreen",
+  "guppy_init_script": "/etc/init.d/guppyscreen",
   "log_path": "/mnt/UDISK/creality/userdata/log/guppyscreen.log",
   "printers": {
     "k2": {

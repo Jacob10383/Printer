@@ -29,5 +29,5 @@ start_service() {
 
 stop_service() {
     echo "Stopping GuppyScreen..."
-    killall -9 guppyscreen
+    pgrep -x guppyscreen >/dev/null && killall -9 guppyscreen 2>/dev/null || true
 }

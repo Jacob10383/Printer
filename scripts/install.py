@@ -33,10 +33,12 @@ class ComponentConfig:
     script: str
     args: Optional[List[str]] = None
     default_active: bool = True
+    dependencies: Optional[List[str]] = None
 
 
 AVAILABLE_COMPONENTS = [
-    ComponentConfig("Guppy Screen", "guppyscreen", "guppyscreen_install.py"),
+    ComponentConfig("GCode Shell Command", "gcode_shell_command", "gcode_shell_command_install.py", default_active=False),
+    ComponentConfig("Guppy Screen", "guppyscreen", "guppyscreen_install.py", dependencies=["gcode_shell_command"]),
     ComponentConfig("uStreamer", "ustreamer", "ustreamer_install.py"),
     ComponentConfig("KAMP", "kamp", "kamp_install.py", default_active=False),
     ComponentConfig("Macros & Configs", "macros", "macros_install.py"),
@@ -165,6 +167,37 @@ class PrinterInstaller:
         self.logger.error("%s installation failed with return code %s", component_name, return_code)
         return False
 
+    def ensure_component(self, slug: str, executed: set, component_map: dict) -> bool:
+        if slug in executed:
+            return True
+
+        if slug not in component_map:
+            self.logger.error("Dependency '%s' not found in configuration", slug)
+            return False
+
+        component = component_map[slug]
+
+        # Resolve dependencies first
+        if component.dependencies:
+            for dep_slug in component.dependencies:
+                if not self.ensure_component(dep_slug, executed, component_map):
+                    self.logger.error("Failed to satisfy dependency '%s' for '%s'", dep_slug, component.name)
+                    return False
+
+        # Run the component
+        self.logger.info("Installing component: %s", component.name)
+        log_section(f"Running {component.name} installer")
+        success = self.run_installer(
+            component.name,
+            component.script,
+            extra_args=component.args
+        )
+        
+        if success:
+            executed.add(slug)
+        
+        return success
+
     # ------------------------------------------------------------------ #
     def run_installation(self, selected_slugs: Optional[List[str]] = None) -> bool:
         if not selected_slugs:
@@ -173,17 +206,24 @@ class PrinterInstaller:
         self.logger.info("Starting 3D Printer Installation...")
         self.logger.info("Components to install: %s", ", ".join(selected_slugs))
 
+        component_map = {c.slug: c for c in AVAILABLE_COMPONENTS}
+        executed = set()
         results: List[ComponentResult] = []
 
-        for component in AVAILABLE_COMPONENTS:
-            if component.slug in selected_slugs:
-                log_section(f"Running {component.name} installer")
-                success = self.run_installer(
-                    component.name,
-                    component.script,
-                    extra_args=component.args
-                )
-                results.append(ComponentResult(component.name, success))
+        for slug in selected_slugs:
+            if slug not in component_map:
+                self.logger.warning("Unknown component slug: %s", slug)
+                continue
+            
+            # Use ensure_component to handle deps and execution
+            success = self.ensure_component(slug, executed, component_map)
+            component_name = component_map[slug].name
+            
+            # Only append to results if it's one of the explicitly requested items
+            # (Dependencies will be logged but not clutter the final summary unless they fail? 
+            #  Actually, let's keep the summary simple to requested items, or maybe all run items?
+            #  For now, let's stick to reporting on what was requested, but success depends on deps.)
+            results.append(ComponentResult(component_name, success))
 
         self.logger.info("=" * 50)
         self.logger.info("INSTALLATION SUMMARY")

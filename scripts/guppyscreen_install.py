@@ -9,9 +9,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib import moonraker, shell  # noqa: E402
-from lib.file_ops import atomic_copy, copy_file, ensure_directory  # noqa: E402
+from lib.config_editors import ensure_include_block  # noqa: E402
+from lib.file_ops import atomic_copy, copy_file, ensure_directory, write_text  # noqa: E402
 from lib.logging_utils import get_logger  # noqa: E402
-from lib.paths import BINARIES_DIR, CONFIGS_DIR, GUPPY_DIR, MOONRAKER_ASVC, SERVICES_DIR  # noqa: E402
+from lib.paths import BINARIES_DIR, CONFIGS_DIR, CUSTOM_CONFIG_DIR, GUPPY_DIR, MOONRAKER_ASVC, SCRIPTS_DIR, SERVICES_DIR  # noqa: E402
+
 
 BINARY_SRC = BINARIES_DIR / "guppyscreen"
 CONFIG_SRC = CONFIGS_DIR / "guppyconfig.json"
@@ -143,6 +145,119 @@ def install_service() -> bool:
     return enable_ok.ok and restart_ok.ok
 
 
+def install_macros() -> bool:
+    logger.info("Installing GuppyScreen macros...")
+    ensure_directory(CUSTOM_CONFIG_DIR)
+    
+    guppy_cfg_path = CUSTOM_CONFIG_DIR / "guppy.cfg"
+    
+    macro_content = """[gcode_shell_command disable_guppy]
+command: switch-to-creality.sh
+timeout: 20.0
+verbose: True
+
+[gcode_macro DISABLE_GUPPY]
+gcode:
+    RUN_SHELL_COMMAND CMD=disable_guppy
+
+[gcode_shell_command enable_guppy]
+command: switch-to-guppy.sh
+timeout: 20.0
+verbose: True
+
+[gcode_macro ENABLE_GUPPY]
+gcode:
+    RUN_SHELL_COMMAND CMD=enable_guppy
+"""
+    try:
+        write_text(guppy_cfg_path, macro_content)
+        logger.info("Created %s", guppy_cfg_path)
+    except Exception as exc:
+        logger.error("Failed to create guppy.cfg: %s", exc)
+        return False
+
+    # Verify/Add include in main.cfg
+    main_cfg_path = CUSTOM_CONFIG_DIR / "main.cfg"
+    try:
+        if ensure_include_block(main_cfg_path, ["guppy.cfg"]):
+            logger.info("Added [include guppy.cfg] to %s", main_cfg_path)
+    except Exception as exc:
+        logger.error("Failed to update main.cfg includes: %s", exc)
+        return False
+        
+    return True
+
+
+def install_gesture_daemon() -> bool:
+    logger.info("Installing gesture daemon...")
+    
+    gesture_binary_src = BINARIES_DIR / "guppy-gesture-daemon"
+    gesture_binary_dst = Path("/usr/bin/guppy-gesture-daemon")
+    gesture_service_src = SERVICES_DIR / "gesture-daemon"
+    gesture_service_dst = Path("/etc/init.d/gesture-daemon")
+    
+    switch_guppy_src = SCRIPTS_DIR / "gesture" / "switch-to-guppy.sh"
+    switch_guppy_dst = Path("/usr/bin/switch-to-guppy.sh")
+    switch_creality_src = SCRIPTS_DIR / "gesture" / "switch-to-creality.sh"
+    switch_creality_dst = Path("/usr/bin/switch-to-creality.sh")
+    
+    success = True
+    
+    # Install gesture daemon binary
+    if not gesture_binary_src.exists():
+        logger.warning("Gesture daemon binary not found at %s, skipping", gesture_binary_src)
+    else:
+        try:
+            copy_file(gesture_binary_src, gesture_binary_dst, mode=0o755)
+            logger.info("Installed gesture daemon binary to %s", gesture_binary_dst)
+        except Exception as exc:
+            logger.error("Failed to install gesture daemon binary: %s", exc)
+            success = False
+    
+    # Install gesture daemon init script
+    if not gesture_service_src.exists():
+        logger.warning("Gesture daemon service not found at %s, skipping", gesture_service_src)
+    else:
+        try:
+            copy_file(gesture_service_src, gesture_service_dst, mode=0o755)
+            logger.info("Installed gesture daemon service to %s", gesture_service_dst)
+        except Exception as exc:
+            logger.error("Failed to install gesture daemon service: %s", exc)
+            success = False
+    
+    # Install switch scripts
+    for src, dst, name in [
+        (switch_guppy_src, switch_guppy_dst, "switch-to-guppy.sh"),
+        (switch_creality_src, switch_creality_dst, "switch-to-creality.sh"),
+    ]:
+        if not src.exists():
+            logger.warning("%s not found at %s, skipping", name, src)
+        else:
+            try:
+                copy_file(src, dst, mode=0o755)
+                logger.info("Installed %s to %s", name, dst)
+            except Exception as exc:
+                logger.error("Failed to install %s: %s", name, exc)
+                success = False
+    
+    # Enable and start gesture daemon service
+    if gesture_service_dst.exists():
+        enable_ok = shell.run("/etc/init.d/gesture-daemon enable")
+        if enable_ok.ok:
+            logger.info("Enabled gesture daemon service")
+        else:
+            logger.error("Failed to enable gesture daemon service")
+            success = False
+        
+        start_ok = shell.run("/etc/init.d/gesture-daemon start")
+        if start_ok.ok:
+            logger.info("Started gesture daemon service")
+        else:
+            logger.warning("Failed to start gesture daemon service (may be normal if display-server not running)")
+    
+    return success
+
+
 def register_with_moonraker() -> bool:
     logger.info("Registering GuppyScreen with Moonraker service list...")
     return moonraker.register_service("guppyscreen", asvc_path=MOONRAKER_ASVC)
@@ -165,6 +280,12 @@ def main() -> None:
         overall_success = False
 
     if not install_service():
+        overall_success = False
+
+    if not install_macros():
+        overall_success = False
+
+    if not install_gesture_daemon():
         overall_success = False
 
     if not overall_success:
