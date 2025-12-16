@@ -41,10 +41,9 @@ AVAILABLE_COMPONENTS = [
     ComponentConfig("Guppy Screen", "guppyscreen", "guppyscreen_install.py", dependencies=["gcode_shell_command"]),
     ComponentConfig("uStreamer", "ustreamer", "ustreamer_install.py"),
     ComponentConfig("KAMP", "kamp", "kamp_install.py", default_active=False),
-    ComponentConfig("Macros & Configs", "macros", "macros_install.py"),
-    ComponentConfig("Macros Only", "macros_only", "macros_install.py", args=["--macros"], default_active=False),
-    ComponentConfig("Start Print Only", "start_print", "macros_install.py", args=["--start-print"], default_active=False),
-    ComponentConfig("Overrides Only", "overrides", "macros_install.py", args=["--overrides"], default_active=False),
+    ComponentConfig("Macros", "macros", "macros_install.py", args=["--macros"]),
+    ComponentConfig("Start Print", "start_print", "macros_install.py", args=["--start-print"], dependencies=["macros"]),
+    ComponentConfig("Overrides", "overrides", "macros_install.py", args=["--overrides"], default_active=False),
     ComponentConfig("Cleanup Service", "cleanup", "cleanup_install.py"),
 
     ComponentConfig("Timelapse", "timelapse", "timelapse_install.py"),
