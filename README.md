@@ -24,8 +24,6 @@ Adds a service to the printer (accessible via Fluidd's services tab) that delete
 ### **shaketune**
 Installs [Shaketune](https://github.com/Frix-x/klippain-shaketune).
 
-### **non_critical_carto**
-Modifies Klipper files to allow the Cartographer to be disconnected and reconnected without Klipper shutdowns. If homing is attempted while disconnected, it will abort and flag a warning.
 
 ### **timelapse / timelapseh264**
 Installs [Moonraker Timelapse](https://github.com/mainsail-crew/moonraker-timelapse). Default is `timelapseh264` (H.264 output), while `timelapse` outputs MJPEG.
@@ -71,4 +69,4 @@ Then run:
 ./install.sh --c kamp overrides cleanup
 ```
 
-**Available components:** `guppyscreen`, `ustreamer`, `kamp`, `macros`, `start_print`, `overrides`, `cleanup`, `shaketune`, `non_critical_carto`, `timelapse`, `timelapseh264`, `mainsail`, `gcode_shell_command`
+**Available components:** `guppyscreen`, `ustreamer`, `kamp`, `macros`, `start_print`, `overrides`, `cleanup`, `shaketune`, `timelapse`, `timelapseh264`, `mainsail`, `gcode_shell_command`
