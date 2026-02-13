@@ -53,7 +53,6 @@ FEATURES="
 # overrides       # <--- Comment out to skip
   cleanup
 # shaketune       # <--- Comment out to skip
-  non_critical_carto
   timelapse
   mainsail
 "

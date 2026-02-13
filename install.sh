@@ -14,8 +14,7 @@ FEATURES="
 # overrides
   cleanup
   shaketune
-  non_critical_carto
-  timelapse
+  timelapseh264
   mainsail
 "
 
