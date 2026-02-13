@@ -14,7 +14,7 @@ FEATURES="
 # overrides
   cleanup
   shaketune
-  timelapse
+  timelapseh264
   mainsail
 "
 
