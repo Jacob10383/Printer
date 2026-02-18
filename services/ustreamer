@@ -2,10 +2,10 @@
 # Tunables
 VIDEO_DEV="/dev/video0"
 RESOLUTION="1920x1080"
-FPS="20"
+FPS="30"
 PORT="8080"
 BIN="/usr/local/bin/ustreamer"
-RESTART_INTERVAL="20"
+RESTART_INTERVAL="60"
 BOOT_START_DELAY="10"
 MAX_STREAM_CLIENTS="2"
 DEDICATED_LOG="/var/log/ustreamer.log"
