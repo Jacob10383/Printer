@@ -1,3 +1,5 @@
+> [!WARNING]
+> **DO NOT USE THIS IF YOU DON'T KNOW WHAT YOU ARE DOING. UNEXPECTED THINGS WILL LIKELY HAPPEN.** 
 ## Features
 
 ### **guppyscreen**
@@ -10,7 +12,7 @@ Disables the stock WebRTC camera feed and installs a ustreamer service that outp
 Installs [KAMP](https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging) for adaptive purging (NOT meshing).
 
 ### **macros**
-Helper and nice-to-have macros (`macros.cfg`).
+Installs `macros.cfg`.
 
 ### **start_print**
 Overhauled version of Jamin's start print macro (`start_print.cfg`). Automatically installs `macros` as a dependency.
