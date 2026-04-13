@@ -711,14 +711,33 @@ class PrinterInstaller:
         except FileNotFoundError:
             pass  # ssh-keygen isn't guaranteed on Windows; ignore if missing
 
-        # Install key into Dropbear authorized_keys
-        self.executor.run("mkdir -p /etc/dropbear && chmod 755 /etc/dropbear")
+        # Detect SSH server: prefer openssh (systemctl sshd) over dropbear
         escaped_key = pubkey.replace('"', r"\"")
-        self.executor.run(
-            f'grep -qxF "{escaped_key}" /etc/dropbear/authorized_keys '
-            f'|| echo "{escaped_key}" >> /etc/dropbear/authorized_keys'
-        )
-        self.executor.run("chmod 600 /etc/dropbear/authorized_keys")
+        openssh_active = False
+        try:
+            result = self.executor.run(
+                "systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || echo inactive",
+            )
+            openssh_active = result.stdout.strip().lower() in ("active", "activating")
+        except Exception:
+            pass
+
+        if openssh_active:
+            self.log("Detected OpenSSH — installing key to /root/.ssh/authorized_keys")
+            self.executor.run("mkdir -p /root/.ssh && chmod 700 /root/.ssh")
+            self.executor.run(
+                f'grep -qxF "{escaped_key}" /root/.ssh/authorized_keys '
+                f'|| echo "{escaped_key}" >> /root/.ssh/authorized_keys'
+            )
+            self.executor.run("chmod 600 /root/.ssh/authorized_keys")
+        else:
+            self.log("Detected Dropbear — installing key to /etc/dropbear/authorized_keys")
+            self.executor.run("mkdir -p /etc/dropbear && chmod 755 /etc/dropbear")
+            self.executor.run(
+                f'grep -qxF "{escaped_key}" /etc/dropbear/authorized_keys '
+                f'|| echo "{escaped_key}" >> /etc/dropbear/authorized_keys'
+            )
+            self.executor.run("chmod 600 /etc/dropbear/authorized_keys")
 
         self.log("SSH key installed. Future connections will not require a password.")
         return True

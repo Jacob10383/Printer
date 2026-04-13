@@ -70,8 +70,13 @@ class PrinterInstallerGUI:
         self.backup_sizes_cache: dict[str, dict] | None = None
         self.CACHE_EXPIRY_SECONDS = 300  # 5 minutes
 
+        # Persistent preferences
+        self._prefs_path = Path.home() / ".printer_installer_prefs.json"
+        self._prefs = self._load_prefs()
+
         # Refs
         self.ip_field = ft.Ref[ft.TextField]()
+        self.password_field = ft.Ref[ft.TextField]()
         self.branch_field = ft.Ref[ft.Dropdown]()
         self.reset_checkbox = ft.Ref[ft.Checkbox]()
         self.preserve_stats_checkbox = ft.Ref[ft.Checkbox]()
@@ -148,6 +153,23 @@ class PrinterInstallerGUI:
 
         mp.set_executable(sys.executable)
 
+    def _load_prefs(self) -> dict:
+        try:
+            return json.loads(self._prefs_path.read_text())
+        except Exception:
+            return {}
+
+    def _save_prefs(self) -> None:
+        try:
+            self._prefs_path.write_text(json.dumps(self._prefs))
+        except Exception:
+            pass
+
+    def _get_password(self) -> str:
+        if self.password_field.current:
+            return self.password_field.current.value or "creality_2024"
+        return self._prefs.get("password", "creality_2024")
+
     def setup_ui(self):
         """Set up the GUI layout."""
 
@@ -198,13 +220,29 @@ class PrinterInstallerGUI:
                     ft.Text(
                         "Installation Settings", size=16, weight=ft.FontWeight.W_500
                     ),
-                    # Printer IP
-                    ft.TextField(
-                        ref=self.ip_field,
-                        label="Printer IP Address",
-                        value="192.168.1.4",
-                        dense=True,
-                        width=300,
+                    # Printer IP + Password row
+                    ft.Row(
+                        [
+                            ft.TextField(
+                                ref=self.ip_field,
+                                label="Printer IP Address",
+                                value="192.168.1.4",
+                                dense=True,
+                                width=220,
+                            ),
+                            ft.TextField(
+                                ref=self.password_field,
+                                label="SSH Password",
+                                value=self._prefs.get("password", "creality_2024"),
+                                password=True,
+                                can_reveal_password=True,
+                                dense=True,
+                                width=200,
+                                on_change=self._on_password_changed,
+                            ),
+                        ],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     # Installation Steps Section
                     ft.Container(
@@ -598,6 +636,10 @@ class PrinterInstallerGUI:
         dropdown.value = default
         self.page.update()
 
+    def _on_password_changed(self, e):
+        self._prefs["password"] = e.control.value or "creality_2024"
+        self._save_prefs()
+
     def on_reset_toggled(self, e):
         """Toggle preserve stats and timelapses checkboxes."""
         is_reset_enabled = self.reset_checkbox.current.value
@@ -808,7 +850,7 @@ class PrinterInstallerGUI:
             temp_installer = PrinterInstaller(
                 printer_ip=ip,
                 branch="main",
-                password="creality_2024",
+                password=self._get_password(),
             )
             temp_installer.logger.setLevel(logging.CRITICAL)
             temp_installer.logger.handlers.clear()
@@ -1339,7 +1381,7 @@ class PrinterInstallerGUI:
             temp_installer = PrinterInstaller(
                 printer_ip=ip,
                 branch="main",
-                password="creality_2024",
+                password=self._get_password(),
             )
             temp_installer.logger.setLevel(logging.CRITICAL)
             temp_installer.logger.handlers.clear()
@@ -2142,6 +2184,7 @@ class PrinterInstallerGUI:
             if repo_selected:
                 args.append("--run-repo")
 
+        args.extend(["--password", self._get_password()])
         return args
 
     def get_action_label(self, action: str) -> str:
